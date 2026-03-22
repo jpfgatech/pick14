@@ -288,17 +288,16 @@ body {
 
 /* Playing card tile (Unicode glyph) */
 .card-visual {
-  --card-w: clamp(3.1rem, 14vw, 4rem);
+  --card-w: clamp(4rem, 20vw, 5.25rem);
   width: var(--card-w);
-  height: calc(var(--card-w) * 1.4);
-  border-radius: 8px;
-  background: linear-gradient(180deg, #fff 0%, #f2f2f2 100%);
-  border: 1px solid #bbb;
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
+  height: calc(var(--card-w) * 1.36);
+  border-radius: 10px;
+  background: linear-gradient(180deg, #fff 0%, #f0f0f0 100%);
+  border: 1px solid #9e9e9e;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.28);
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: calc(var(--card-w) * 0.72);
   line-height: 1;
   user-select: none;
   position: relative;
@@ -306,19 +305,55 @@ body {
 }
 
 .card-visual--sm {
-  --card-w: 2rem;
-  font-size: calc(var(--card-w) * 0.65);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  --card-w: 2.35rem;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
 }
 
+/* Large, fully opaque glyph layer (hides hidden fallback; avoids “ghost” transparency). */
 .card-visual__glyph {
   position: relative;
   z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 92%;
+  height: 88%;
+  margin: auto;
+  font-size: calc(var(--card-w) * 0.88);
+  line-height: 1;
+  background: #fff;
+  border-radius: 6px;
   font-family: "Segoe UI Symbol", "Apple Color Emoji", "Noto Color Emoji", "Noto Sans Symbols 2",
     sans-serif;
+  -webkit-font-smoothing: antialiased;
 }
 
-/* Under the glyph; only obvious if the font has no playing-card glyphs (then you see text). */
+.card-visual--sm .card-visual__glyph {
+  font-size: calc(var(--card-w) * 0.82);
+}
+
+/* Red / black suit tint (helps monochrome fonts; color emoji may ignore this). */
+.card-tone--red .card-visual__glyph {
+  color: #b71c1c;
+  background: linear-gradient(180deg, #fff5f5 0%, #ffebee 100%);
+}
+
+.card-tone--black .card-visual__glyph {
+  color: #1a1a1a;
+  background: linear-gradient(180deg, #fafafa 0%, #eceff1 100%);
+}
+
+.card-tone--joker-red .card-visual__glyph {
+  color: #c62828;
+  background: linear-gradient(180deg, #ffebee 0%, #ffcdd2 100%);
+}
+
+.card-tone--joker-black .card-visual__glyph {
+  color: #37474f;
+  background: linear-gradient(180deg, #eceff1 0%, #cfd8dc 100%);
+}
+
+/* Hidden by default so it never bleeds through the glyph (parent still has aria-label). */
 .card-visual__fallback {
   position: absolute;
   inset: 0;
@@ -329,21 +364,39 @@ body {
   font-size: 0.55rem;
   padding: 0.2rem;
   text-align: center;
-  color: #222;
   font-family: ui-monospace, monospace;
-  line-height: 1.1;
-  opacity: 0.95;
+  line-height: 1.15;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
 }
 
-/* Optional: show text labels when the OS font lacks U+1F0A1… playing-card block */
+.card-tone--red .card-visual__fallback {
+  color: #b71c1c;
+}
+
+.card-tone--black .card-visual__fallback {
+  color: #1a1a1a;
+}
+
+.card-tone--joker-red .card-visual__fallback {
+  color: #c62828;
+}
+
+.card-tone--joker-black .card-visual__fallback {
+  color: #37474f;
+}
+
+/* Explicit “text mode” when glyphs are missing on a device */
 .app.show-card-text .card-visual__glyph {
-  opacity: 0.12;
+  opacity: 0.15;
 }
 
 .app.show-card-text .card-visual__fallback {
   z-index: 2;
   opacity: 1;
-  background: rgba(255, 255, 255, 0.92);
+  visibility: visible;
+  background: rgba(255, 255, 255, 0.96);
 }
 
 /* Deal-in animation */

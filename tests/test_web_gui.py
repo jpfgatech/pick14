@@ -1,4 +1,18 @@
-"""HTTP and file tests for the bundled responsive web UI."""
+"""
+Automated checks for the bundled web UI.
+
+What these tests do **not** cover (by design, unless you add tooling):
+  - Pixel-perfect layout, font rasterization, or emoji appearance in real browsers.
+  - Cross-browser visual regressions.
+
+They only assert that static files exist, key markup/CSS/JS strings are present, and
+the FastAPI app serves ``/`` and ``/assets/*`` with plausible responses. Visual
+issues must still be caught with manual QA or optional browser automation
+(e.g. Playwright screenshot tests behind an env flag).
+
+If you want automated visuals later, add e.g. ``playwright`` + a small smoke that
+loads ``/`` and compares a screenshot hash in CI.
+"""
 
 import pytest
 
@@ -36,11 +50,14 @@ def test_styles_include_breakpoints_and_motion_query():
     assert "safe-area-inset" in css
     assert "100dvh" in css or "dvh" in css
     assert "prefers-reduced-motion" in css
+    assert "card-tone--red" in css
+    assert "card-tone--black" in css
 
 
 def test_app_js_unicode_cards_and_fetch():
     js = (WEB_DIR / "app.js").read_text(encoding="utf-8")
     assert "cardGlyph" in js or "cardGlyph" in js.replace(" ", "")
+    assert "cardToneClass" in js
     assert "0x1f0" in js.lower() or "0x1F0" in js
     assert "fetch(" in js
     assert "/sessions" in js

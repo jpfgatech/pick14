@@ -43,6 +43,13 @@ function formatCardText(c) {
   return `${rankLabel(c.rank)} of ${SUIT_NAMES[c.suit] || "?"}`;
 }
 
+/** CSS hook: red = diamond+heart, black = club+spade (BLADE). */
+function cardToneClass(c) {
+  if (c.joker) return c.red ? "card-tone--joker-red" : "card-tone--joker-black";
+  if (c.suit === 1 || c.suit === 2) return "card-tone--red";
+  return "card-tone--black";
+}
+
 function scoreValue(c) {
   if (c.joker) return 5;
   const m = { 0: 1, 1: 2, 2: 4, 3: 3 };
@@ -65,7 +72,8 @@ function createCardVisual(c, opts = {}) {
   const li = document.createElement("li");
   li.className = "card-visual-wrap";
   const face = document.createElement("div");
-  face.className = "card-visual" + (opts.small ? " card-visual--sm" : "");
+  face.className =
+    "card-visual" + (opts.small ? " card-visual--sm" : "") + " " + cardToneClass(c);
   if (opts.dealDelay != null && opts.dealDelay >= 0) {
     face.classList.add("card-visual--deal");
     face.style.setProperty("--deal-delay", `${opts.dealDelay}ms`);
@@ -75,6 +83,7 @@ function createCardVisual(c, opts = {}) {
   const fb = document.createElement("span");
   fb.className = "card-visual__fallback";
   fb.textContent = formatCardText(c);
+  fb.setAttribute("aria-hidden", "true");
 
   const glyph = document.createElement("span");
   glyph.className = "card-visual__glyph";
