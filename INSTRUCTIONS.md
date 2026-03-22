@@ -61,3 +61,9 @@ A poker-style game engine with a CLI front end (web UI to be defined).
 | Python venv | `~/Documents/projects/venv/` |
 | Process    | Test-driven development |
 | Delivery   | Ship a usable demo, then document strategies, assumptions, and test design |
+| Version control | Commit **frequently** — small, logical commits after each meaningful chunk (keep tests green) |
+
+### Git workflow
+
+- Prefer many small commits over one large dump (e.g. after a feature slice or passing test run).
+- Commit messages: short imperative summary; add a body only when context is non-obvious.

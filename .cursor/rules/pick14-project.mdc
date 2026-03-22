@@ -12,3 +12,5 @@ alwaysApply: true
 - **Delivery:** aim for a runnable demo, then summarize implementation choices, assumptions, and how tests map to the rules.
 
 When implementing game logic, treat `INSTRUCTIONS.md` as the source of truth for rules, scoring, phases, and UI behavior.
+
+- **Git:** commit often — after each coherent, passing step (docs, module, tests). Keep commits small and descriptive.
