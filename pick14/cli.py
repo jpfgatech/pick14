@@ -21,6 +21,38 @@ from pick14.engine import (
 )
 
 
+def _points_phrase(n: int) -> str:
+    """Align the numeric part to 2 columns, e.g. '( 9 points)' vs '(10 points)'."""
+    return f"({n:>2} points)"
+
+
+def _sorted_matches(state: GameState) -> list[MatchMove]:
+    ms = match_moves(state)
+
+    def sort_key(m: MatchMove) -> tuple[int, int, tuple[int, ...]]:
+        pts = match_capture_points(state, m)
+        return (-pts, m.public_index, m.hand_indices)
+
+    return sorted(ms, key=sort_key)
+
+
+def _sorted_plays(state: GameState) -> list[PlayMove]:
+    ps = play_moves(state)
+    hand = state.hands[state.current_player]
+
+    def sort_key(p: PlayMove) -> tuple[int, int]:
+        return (score_value(hand[p.hand_index]), p.hand_index)
+
+    return sorted(ps, key=sort_key)
+
+
+def _move_points_before(state: GameState, move: PlayMove | MatchMove) -> int:
+    if isinstance(move, PlayMove):
+        c = state.hands[state.current_player][move.hand_index]
+        return score_value(c)
+    return match_capture_points(state, move)
+
+
 def _print_scores(state: GameState) -> None:
     print("\n=== Game over — scores ===")
     for i in range(state.num_players):
@@ -40,6 +72,11 @@ def _describe_move(state: GameState, move: PlayMove | MatchMove) -> str:
     return f"pick {format_card(pub)} by {parts}"
 
 
+def _describe_move_with_points(state: GameState, move: PlayMove | MatchMove) -> str:
+    pts = _move_points_before(state, move)
+    return f"{_points_phrase(pts)} {_describe_move(state, move)}"
+
+
 def _print_table(state: GameState) -> None:
     print("\nPublic pool:")
     for c in state.public:
@@ -56,13 +93,13 @@ def _format_match_line(state: GameState, m: MatchMove, idx: int) -> str:
     pub = state.public[m.public_index]
     hand = state.hands[state.current_player]
     parts = ", ".join(format_card(hand[i]) for i in m.hand_indices)
-    return f"[{idx}] ({pts} points) pick {format_card(pub)} by {parts}"
+    return f"[{idx}] {_points_phrase(pts)} pick {format_card(pub)} by {parts}"
 
 
 def _format_play_line(state: GameState, p: PlayMove, idx: int) -> str:
     c = state.hands[state.current_player][p.hand_index]
     pts = score_value(c)
-    return f"[{idx}] ({pts} points) play {format_card(c)}"
+    return f"[{idx}] {_points_phrase(pts)} play {format_card(c)}"
 
 
 def _read_token() -> str:
@@ -74,10 +111,10 @@ def _human_turn(state: GameState, commit) -> str:
     _print_table(state)
 
     if not state.must_play_only:
-        ms = match_moves(state)
+        ms = _sorted_matches(state)
         if ms:
             print("\nMatch (optional):")
-            print("[0] (0 points) skip")
+            print(f"  [0] {_points_phrase(0)} skip")
             for i, m in enumerate(ms, start=1):
                 print(f"  {_format_match_line(state, m, i)}")
             tok = _read_token()
@@ -94,11 +131,11 @@ def _human_turn(state: GameState, commit) -> str:
                     return "ok"
                 # 0 or out of range → fall through to plays
 
-    ps = play_moves(state)
+    ps = _sorted_plays(state)
     if not ps:
         return "ok"
 
-    print("\nPlay a card from your hand:")
+    print("\nPlay a card from your hand (0 .. {}):".format(len(ps) - 1))
     for i, p in enumerate(ps):
         print(f"  {_format_play_line(state, p, i)}")
 
@@ -139,7 +176,7 @@ def run_session(num_players: int, rng: Random) -> str:
             commit(mv)
             st = undo[-1] if undo else state
             who = f"Player {cp}"
-            print(f"\n{who}: {_describe_move(st, mv)}")
+            print(f"\n{who}: {_describe_move_with_points(st, mv)}")
             continue
 
         cmd = _human_turn(state, commit)
@@ -156,7 +193,11 @@ def run_session(num_players: int, rng: Random) -> str:
 def main() -> None:
     rng = Random()
     print("Pick14 — you are seat 0; other seats use the dummy agent.")
-    print("Commands any time: q quit, n new game, r regret (undo last move).")
+    print("Commands any time: q quit, n new game, r regret.")
+    print(
+        "Regret: each r undoes one applied move (any seat) via saved snapshots; "
+        "repeat r to step back further. Bots are deterministic and may repeat the same action."
+    )
     while True:
         raw = input("\nHow many players (2+)? ").strip().lower()
         if raw == "q":
