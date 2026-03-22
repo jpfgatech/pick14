@@ -3,15 +3,21 @@
 Run locally::
 
     uvicorn pick14.server:app --reload --port 8000
+
+Then open http://127.0.0.1:8000/ for the responsive web UI (same origin as the API).
 """
 
 from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from random import Random
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from pick14.agent import choose_dummy_action
@@ -37,7 +43,17 @@ class TableSession:
 
 SESSIONS: dict[str, TableSession] = {}
 
+WEB_DIR = Path(__file__).resolve().parent / "web"
+
 app = FastAPI(title="Pick14", version="0.1.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 class NewSessionIn(BaseModel):
@@ -89,6 +105,14 @@ def _view(state: GameState) -> dict:
         "current_player": state.current_player,
         "finished": is_finished(state),
     }
+
+
+@app.get("/")
+def serve_web_index():
+    index = WEB_DIR / "index.html"
+    if not index.is_file():
+        raise HTTPException(status_code=404, detail="web UI not installed")
+    return FileResponse(index)
 
 
 @app.post("/sessions")
@@ -158,3 +182,6 @@ def regret(session_id: str):
         raise HTTPException(status_code=400, detail="nothing to undo")
     sess.state = restored
     return {**_view(sess.state), "remaining_completed_segments": rem}
+
+
+app.mount("/assets", StaticFiles(directory=WEB_DIR), name="assets")

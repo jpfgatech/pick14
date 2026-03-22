@@ -21,6 +21,9 @@ pick14 = "pick14.cli:main"
 where = ["."]
 include = ["pick14*"]
 
+[tool.setuptools.package-data]
+pick14 = ["web/*.html", "web/*.css", "web/*.js"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
