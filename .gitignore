@@ -1,3 +1,6 @@
+*.swp
+.*.swp
+
 __pycache__/
 *.py[cod]
 .Python
