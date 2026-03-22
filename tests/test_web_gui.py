@@ -24,7 +24,9 @@ def test_index_is_responsive_shell():
     assert "/assets/app.js" in html
     assert "viewport-fit=cover" in html
     assert "cheatToggle" in html
+    assert "cardTextToggle" in html
     assert "deckStage" in html
+    assert "fonts.googleapis.com" in html
 
 
 def test_styles_include_breakpoints_and_motion_query():

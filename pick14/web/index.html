@@ -5,6 +5,13 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#0f1419" />
     <title>Pick14</title>
+    <!-- One font request (not per card) — improves playing-card Unicode glyphs on some Linux/Android browsers -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Noto+Sans+Symbols+2&display=swap"
+      rel="stylesheet"
+    />
     <link rel="stylesheet" href="/assets/styles.css" />
   </head>
   <body>
@@ -23,6 +30,10 @@
           <label for="seed">Seed <span class="hint">(optional)</span></label>
           <input id="seed" type="number" inputmode="numeric" placeholder="random" />
         </div>
+        <label class="field-row cheat-toggle" style="margin-top: 0.5rem">
+          <input type="checkbox" id="cardTextToggle" />
+          <span>Prefer text inside card tiles (if glyphs look empty)</span>
+        </label>
         <button type="button" class="btn btn--primary" id="btnNew">New game</button>
       </section>
 

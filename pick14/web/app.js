@@ -72,18 +72,21 @@ function createCardVisual(c, opts = {}) {
   }
   if (opts.extraClass) face.classList.add(opts.extraClass);
 
+  const fb = document.createElement("span");
+  fb.className = "card-visual__fallback";
+  fb.textContent = formatCardText(c);
+
   const glyph = document.createElement("span");
   glyph.className = "card-visual__glyph";
   glyph.textContent = cardGlyph(c);
   glyph.setAttribute("aria-hidden", "true");
 
-  const fb = document.createElement("span");
-  fb.className = "card-visual__fallback";
-  fb.textContent = formatCardText(c);
-
-  face.appendChild(glyph);
+  /* Fallback first in DOM so the glyph paints on top (was reversed → text covered the card character). */
   face.appendChild(fb);
+  face.appendChild(glyph);
   face.title = formatCardText(c);
+  face.setAttribute("role", "img");
+  face.setAttribute("aria-label", formatCardText(c));
   li.appendChild(face);
   return li;
 }
@@ -417,4 +420,8 @@ document.getElementById("btnRefresh").addEventListener("click", refresh);
 
 document.getElementById("cheatToggle").addEventListener("change", (e) => {
   document.getElementById("scoreBoard").classList.toggle("cheat-on", e.target.checked);
+});
+
+document.getElementById("cardTextToggle").addEventListener("change", (e) => {
+  document.getElementById("app").classList.toggle("show-card-text", e.target.checked);
 });
