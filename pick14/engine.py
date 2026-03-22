@@ -94,6 +94,17 @@ def score_as_sets_and_points(points: int) -> tuple[int, int]:
     return divmod(points, 4)
 
 
+def play_moves(state: GameState) -> list[PlayMove]:
+    if is_finished(state):
+        return []
+    hand = state.hands[state.current_player]
+    return [PlayMove(i) for i in range(len(hand))]
+
+
+def match_moves(state: GameState) -> list[MatchMove]:
+    return _legal_matches(state)
+
+
 def legal_moves(state: GameState) -> list[Move]:
     if is_finished(state):
         return []
@@ -102,7 +113,7 @@ def legal_moves(state: GameState) -> list[Move]:
     if not hand and not state.must_play_only:
         return []
 
-    plays: list[Move] = [PlayMove(i) for i in range(len(hand))]
+    plays = play_moves(state)
 
     if state.must_play_only:
         return plays
