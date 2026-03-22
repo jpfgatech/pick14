@@ -1,0 +1,14 @@
+---
+description: Pick14 stack, workflow, and venv for all project work
+alwaysApply: true
+---
+
+# Pick14 — project defaults
+
+- **Engine and CLI:** Python.
+- **Web:** React Native or another fit-for-purpose stack once specified in `INSTRUCTIONS.md`.
+- **Virtualenv:** use `~/Documents/projects/venv/` for this project’s Python environment (activate before running tests or demos).
+- **Process:** test-driven development — add or extend tests with behavior changes; prefer small, focused tests that encode rules from `INSTRUCTIONS.md`.
+- **Delivery:** aim for a runnable demo, then summarize implementation choices, assumptions, and how tests map to the rules.
+
+When implementing game logic, treat `INSTRUCTIONS.md` as the source of truth for rules, scoring, phases, and UI behavior.

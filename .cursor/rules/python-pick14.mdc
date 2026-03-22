@@ -1,0 +1,12 @@
+---
+description: Python style and testing expectations for engine and CLI
+globs: "**/*.py"
+alwaysApply: false
+---
+
+# Python (engine + CLI)
+
+- Match existing module layout and naming when adding code; avoid unrelated refactors in the same change.
+- Prefer pure functions and small types for card/deck/state; keep I/O (CLI) thin.
+- **TDD:** write or update tests in the same change as new behavior; name tests after the rule or scenario they protect (phases, scoring, combinations summing to 14, make-up draws, etc.).
+- Do not hardcode paths to a venv inside source; document run commands assuming `~/Documents/projects/venv/` is activated externally.
