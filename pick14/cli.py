@@ -106,8 +106,8 @@ def _read_token() -> str:
     return input("> ").strip().lower()
 
 
-def _human_turn(state: GameState, commit) -> str:
-    """Apply a human move via `commit`, or return quit/new/regret."""
+def _human_turn(state: GameState, commit_human) -> str:
+    """Apply a human move via `commit_human`, or return quit/new/regret."""
     _print_table(state)
 
     if not state.must_play_only:
@@ -127,7 +127,7 @@ def _human_turn(state: GameState, commit) -> str:
             if tok.isdigit():
                 choice = int(tok)
                 if 1 <= choice <= len(ms):
-                    commit(ms[choice - 1])
+                    commit_human(ms[choice - 1])
                     return "ok"
                 # 0 or out of range → fall through to plays
 
@@ -150,7 +150,7 @@ def _human_turn(state: GameState, commit) -> str:
         if tok.isdigit():
             choice = int(tok)
             if 0 <= choice < len(ps):
-                commit(ps[choice])
+                commit_human(ps[choice])
                 return "ok"
         print("Invalid choice; enter a listed index, or q / n / r.")
 
@@ -158,8 +158,9 @@ def _human_turn(state: GameState, commit) -> str:
 def run_session(num_players: int, rng: Random) -> str:
     state = new_game(num_players, rng=rng)
     undo: list[GameState] = []
+    consecutive_undos = 0
 
-    def commit(move: PlayMove | MatchMove) -> None:
+    def commit_human(move: PlayMove | MatchMove) -> None:
         nonlocal state
         undo.append(clone(state))
         apply_move(state, move)
@@ -172,14 +173,14 @@ def run_session(num_players: int, rng: Random) -> str:
 
         cp = state.current_player
         if cp != 0:
+            st_before = clone(state)
             mv = choose_dummy_action(state)
-            commit(mv)
-            st = undo[-1] if undo else state
+            apply_move(state, mv)
             who = f"Player {cp}"
-            print(f"\n{who}: {_describe_move_with_points(st, mv)}")
+            print(f"\n{who}: {_describe_move_with_points(st_before, mv)}")
             continue
 
-        cmd = _human_turn(state, commit)
+        cmd = _human_turn(state, commit_human)
         if cmd == "quit":
             return "quit"
         if cmd == "new":
@@ -187,7 +188,18 @@ def run_session(num_players: int, rng: Random) -> str:
         if cmd == "regret":
             if undo:
                 state = undo.pop()
+                consecutive_undos += 1
+                remaining = len(undo)
+                print(
+                    f"Reverted your last committed action "
+                    f"({consecutive_undos} undo(s) since your last play; "
+                    f"{remaining} older action(s) still reversible)."
+                )
+            else:
+                print("Nothing to undo.")
             continue
+        if cmd == "ok":
+            consecutive_undos = 0
 
 
 def main() -> None:
@@ -195,8 +207,8 @@ def main() -> None:
     print("Pick14 — you are seat 0; other seats use the dummy agent.")
     print("Commands any time: q quit, n new game, r regret.")
     print(
-        "Regret: each r undoes one applied move (any seat) via saved snapshots; "
-        "repeat r to step back further. Bots are deterministic and may repeat the same action."
+        "Regret: each r restores the game to before your last committed action "
+        "(bot moves since then are rolled back too). Repeat r to step back through your past plays."
     )
     while True:
         raw = input("\nHow many players (2+)? ").strip().lower()
