@@ -19,6 +19,7 @@ from pick14.engine import (
     skip_empty_hands,
     total_score_points,
 )
+from pick14.human_undo import HumanSegmentUndo
 
 
 def _points_phrase(n: int) -> str:
@@ -157,13 +158,13 @@ def _human_turn(state: GameState, commit_human) -> str:
 
 def run_session(num_players: int, rng: Random) -> str:
     state = new_game(num_players, rng=rng)
-    undo: list[GameState] = []
+    undo_ctl = HumanSegmentUndo()
     consecutive_undos = 0
 
     def commit_human(move: PlayMove | MatchMove) -> None:
         nonlocal state
-        undo.append(clone(state))
         apply_move(state, move)
+        undo_ctl.on_human_committed(state)
 
     while True:
         skip_empty_hands(state)
@@ -180,20 +181,21 @@ def run_session(num_players: int, rng: Random) -> str:
             print(f"\n{who}: {_describe_move_with_points(st_before, mv)}")
             continue
 
+        undo_ctl.on_human_turn_begin(state)
         cmd = _human_turn(state, commit_human)
         if cmd == "quit":
             return "quit"
         if cmd == "new":
             return "new"
         if cmd == "regret":
-            if undo:
-                state = undo.pop()
+            restored, remaining = undo_ctl.regret()
+            if restored is not None:
+                state = restored
                 consecutive_undos += 1
-                remaining = len(undo)
                 print(
-                    f"Reverted your last committed action "
-                    f"({consecutive_undos} undo(s) since your last play; "
-                    f"{remaining} older action(s) still reversible)."
+                    f"Reverted your last human turn segment "
+                    f"({consecutive_undos} undo(s) since your last forward play; "
+                    f"{remaining} completed segment(s) still reversible)."
                 )
             else:
                 print("Nothing to undo.")
@@ -207,8 +209,9 @@ def main() -> None:
     print("Pick14 — you are seat 0; other seats use the dummy agent.")
     print("Commands any time: q quit, n new game, r regret.")
     print(
-        "Regret: each r restores the game to before your last committed action "
-        "(bot moves since then are rolled back too). Repeat r to step back through your past plays."
+        "Regret: each r restores to the start of your current turn segment, "
+        "or to before a prior completed segment (match + forced play count as one segment). "
+        "Bot moves after your segment are rolled back with it."
     )
     while True:
         raw = input("\nHow many players (2+)? ").strip().lower()
