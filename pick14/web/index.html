@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#0f1419" />
     <title>Pick14</title>
-    <link rel="stylesheet" href="/assets/styles.css" />
+    <link rel="stylesheet" href="assets/styles.css" />
   </head>
   <body>
     <div id="app" class="app">
@@ -40,6 +40,10 @@
           </div>
           <div class="card-block card-block--scores">
             <h2>Scores</h2>
+            <div class="confirm-row confirm-row--score">
+              <button type="button" class="btn btn--primary" id="btnConfirmAction" disabled>Confirm action</button>
+              <div class="action-info" id="actionInfo">No action selected.</div>
+            </div>
             <ul class="score-list" id="scoreList"></ul>
           </div>
         </div>
@@ -51,10 +55,6 @@
           <p class="selection-help" id="selectionHelp">
             Select one hand card to play, or select one public card + one or more hand cards to match.
           </p>
-          <div class="confirm-row">
-            <button type="button" class="btn btn--primary" id="btnConfirmAction" disabled>Confirm action</button>
-            <div class="action-info" id="actionInfo">No action selected.</div>
-          </div>
         </section>
 
         <div class="toolbar">
@@ -69,6 +69,6 @@
         <button type="button" class="btn btn--primary" id="btnAgain">Play again</button>
       </section>
     </div>
-    <script src="/assets/app.js" defer></script>
+    <script src="assets/app.js" defer></script>
   </body>
 </html>

@@ -20,8 +20,8 @@ def test_index_is_responsive_shell():
     assert 'name="viewport"' in html
     assert "width=device-width" in html
     assert 'id="app"' in html
-    assert "/assets/styles.css" in html
-    assert "/assets/app.js" in html
+    assert "assets/styles.css" in html
+    assert "assets/app.js" in html
     assert "viewport-fit=cover" in html
     assert "btnConfirmAction" in html
     assert "actionInfo" in html
@@ -55,10 +55,10 @@ def test_get_root_serves_index():
 
 def test_get_assets():
     c = TestClient(app)
-    css = c.get("/assets/styles.css")
+    css = c.get("assets/styles.css")
     assert css.status_code == 200
     assert "text/css" in css.headers.get("content-type", "")
-    js = c.get("/assets/app.js")
+    js = c.get("assets/app.js")
     assert js.status_code == 200
     assert "javascript" in js.headers.get("content-type", "").lower() or "ecmascript" in js.headers.get(
         "content-type", ""

@@ -10,6 +10,7 @@ alwaysApply: true
 - **Virtualenv:** use `~/Documents/projects/venv/` for this project’s Python environment (activate before running tests or demos).
 - **Process:** test-driven development — add or extend tests with behavior changes; prefer small, focused tests that encode rules from `INSTRUCTIONS.md`.
 - **Delivery:** aim for a runnable demo, then summarize implementation choices, assumptions, and how tests map to the rules.
+- **Operator transparency:** when running shell/deploy commands, explain each command before running it (goal, mechanism, expected result), and report outcome right after.
 
 When implementing game logic, treat `INSTRUCTIONS.md` as the source of truth for rules, scoring, phases, and UI behavior.
 

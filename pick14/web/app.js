@@ -4,10 +4,12 @@
 
 const SUIT_NAMES = ["CLUB", "DIAMOND", "HEART", "BLADE"];
 const SUIT_BASE = [0x1f0d1, 0x1f0c1, 0x1f0b1, 0x1f0a1];
-const JOKER_RED = 0x1f0bf;
+const JOKER_RED = 0x1f0cf;
 const JOKER_BLACK = 0x1f0cf;
 
 let sessionId = null;
+const API_PREFIX = window.location.pathname.startsWith("/pick14") ? "/pick14" : "";
+
 let currentView = null;
 const selectedHand = new Set();
 let selectedPublic = null;
@@ -247,7 +249,7 @@ async function submitSelectedAction() {
   if (!action || !action.valid) return;
   setStatus("…");
   try {
-    const view = await api("POST", `/sessions/${sessionId}/moves/human`, action.payload);
+    const view = await api("POST", `${API_PREFIX}/sessions/${sessionId}/moves/human`, action.payload);
     selectedHand.clear();
     selectedPublic = null;
     applyView(view);
@@ -296,7 +298,7 @@ function pollUntilHuman() {
   const sid = sessionId;
   pollTimer = setInterval(async () => {
     try {
-      const view = await api("GET", `/sessions/${sid}`);
+      const view = await api("GET", `${API_PREFIX}/sessions/${sid}`);
       if (view.finished || view.current_player === 0) {
         clearInterval(pollTimer);
         pollTimer = null;
@@ -320,7 +322,7 @@ async function newGame() {
   if (seedRaw !== "") body.seed = parseInt(seedRaw, 10);
   setStatus("Starting…");
   try {
-    const data = await api("POST", "/sessions", body);
+    const data = await api("POST", `${API_PREFIX}/sessions`, body);
     sessionId = data.session_id;
     selectedHand.clear();
     selectedPublic = null;
@@ -335,7 +337,7 @@ async function regret() {
   if (!sessionId) return;
   setStatus("…");
   try {
-    const view = await api("POST", `/sessions/${sessionId}/regret`);
+    const view = await api("POST", `${API_PREFIX}/sessions/${sessionId}/regret`);
     selectedHand.clear();
     selectedPublic = null;
     setStatus(view.remaining_completed_segments != null ? `${view.remaining_completed_segments} older segment(s) still reversible` : "");

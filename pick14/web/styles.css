@@ -325,6 +325,7 @@ body {
   display: grid;
   grid-template-columns: 1fr;
   gap: 0.6rem;
+  margin-bottom: 0.75rem;
 }
 
 @media (min-width: 700px) {
@@ -342,6 +343,10 @@ body {
   color: var(--text);
   background: rgba(19, 27, 36, 0.5);
   font-size: 0.92rem;
+}
+
+.confirm-row--score .btn--primary {
+  width: 100%;
 }
 
 .toolbar {
