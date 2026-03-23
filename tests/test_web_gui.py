@@ -23,6 +23,8 @@ def test_index_is_responsive_shell():
     assert "/assets/styles.css" in html
     assert "/assets/app.js" in html
     assert "viewport-fit=cover" in html
+    assert "btnConfirmAction" in html
+    assert "actionInfo" in html
 
 
 def test_styles_include_breakpoints_for_adaptive_layout():
@@ -36,6 +38,8 @@ def test_styles_include_breakpoints_for_adaptive_layout():
 def test_app_js_has_card_formatting_and_fetch():
     js = (WEB_DIR / "app.js").read_text(encoding="utf-8")
     assert "function formatCard" in js
+    assert "function cardGlyph" in js
+    assert "selectedHand" in js
     assert "fetch(" in js
     assert "/sessions" in js
 

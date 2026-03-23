@@ -11,7 +11,7 @@
     <div id="app" class="app">
       <header class="header">
         <h1 class="title">Pick14</h1>
-        <p class="tagline">Seat 0 — you · other seats · dummy agent</p>
+        <p class="tagline">Tap cards to select. Confirm once for play or match.</p>
       </header>
 
       <section class="panel panel--setup" id="setup" aria-label="New game">
@@ -46,17 +46,14 @@
 
         <div class="must-play" id="mustPlay" hidden>You must play one card to the public pool.</div>
 
-        <section class="actions" aria-label="Legal moves">
+        <section class="actions" aria-label="Action confirmation">
           <h2 class="actions__title">Your move</h2>
-          <div class="action-groups">
-            <div class="action-group" id="matchGroup" hidden>
-              <h3>Match <span class="hint">(optional)</span></h3>
-              <div class="btn-grid" id="matchButtons"></div>
-            </div>
-            <div class="action-group" id="playGroup" hidden>
-              <h3>Play from hand</h3>
-              <div class="btn-grid" id="playButtons"></div>
-            </div>
+          <p class="selection-help" id="selectionHelp">
+            Select one hand card to play, or select one public card + one or more hand cards to match.
+          </p>
+          <div class="confirm-row">
+            <button type="button" class="btn btn--primary" id="btnConfirmAction" disabled>Confirm action</button>
+            <div class="action-info" id="actionInfo">No action selected.</div>
           </div>
         </section>
 
