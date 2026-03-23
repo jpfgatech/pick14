@@ -129,6 +129,25 @@ def test_match_with_empty_deck_advances_without_forced_play():
     assert g.current_player == 1
 
 
+def test_match_with_partial_draw_does_not_force_play_if_hand_not_above_n_hand():
+    pub7 = _card(Rank.SEVEN, Suit.HEART)
+    a = _card(Rank.ACE, Suit.CLUB)
+    six = _card(Rank.SIX, Suit.DIAMOND)
+    only_one_draw = [_card(Rank.TWO, Suit.HEART)]
+    g = _minimal_state(
+        hands=[[a, six, _card(Rank.KING, Suit.CLUB)], [_card(Rank.JACK, Suit.SPADE)] * 3],
+        public=[pub7],
+        deck=list(only_one_draw),
+        current_player=0,
+        n_hand=3,
+    )
+    apply_move(g, MatchMove(0, (0, 1)))
+    # After matching, hand was 1; only one draw available -> hand=2 (not > N_HAND), so no forced play.
+    assert len(g.hands[0]) == 2
+    assert g.must_play_only is False
+    assert g.current_player == 1
+
+
 def test_play_with_empty_deck_skips_makeup():
     ace = _card(Rank.ACE, Suit.CLUB)
     g = _minimal_state(

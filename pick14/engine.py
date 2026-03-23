@@ -216,7 +216,10 @@ def _apply_match(state: GameState, public_index: int, hand_indices: tuple[int, .
 
     if not deck_exhausted(state):
         _draw_to_target(state, p, state.n_hand + 1)
-        state.must_play_only = True
+        # Forced public play is only required if draw actually raised hand above N_HAND.
+        state.must_play_only = len(state.hands[p]) > state.n_hand
+        if not state.must_play_only:
+            _advance_player(state)
     else:
         state.must_play_only = False
         _advance_player(state)

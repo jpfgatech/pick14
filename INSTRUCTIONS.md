@@ -24,7 +24,7 @@ A poker-style game engine with a CLI front end (web UI to be defined).
 
 - If the deck is **not** exhausted:
   - If the player added a card to the public pool: draw until they have `N_HAND` cards again.
-  - Otherwise: draw until they have `N_HAND + 1` cards, then they must play one card to the public pool.
+  - Otherwise: draw up to `N_HAND + 1` cards; the forced play to public is required only if hand size is actually `> N_HAND` after drawing.
 - If the deck **is** exhausted:
   - Skip make-up; players alternate the action phase only.
 

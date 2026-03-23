@@ -226,9 +226,9 @@ body {
   justify-content: center;
   font-family: "Segoe UI Symbol", "Apple Color Emoji", "Noto Color Emoji", "Noto Sans Symbols 2",
     sans-serif;
-  font-size: calc(var(--card-w) * 1.95);
-  line-height: 0.78;
-  transform: scale(1.2);
+  font-size: calc(var(--card-w) * 1.42);
+  line-height: 0.88;
+  transform: translateY(-8%) scale(1.04);
   transform-origin: center center;
 }
 
@@ -246,10 +246,14 @@ body {
 
 .card-tile--joker-red .card-tile__glyph {
   color: #c62828;
+  font-size: calc(var(--card-w) * 1.22);
+  transform: translateY(-4%) scale(0.9);
 }
 
 .card-tile--joker-black .card-tile__glyph {
   color: #37474f;
+  font-size: calc(var(--card-w) * 1.22);
+  transform: translateY(-4%) scale(0.9);
 }
 
 .card-btn {
