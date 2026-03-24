@@ -1,0 +1,7 @@
+teacher_samples=1316
+bc_loss_first=0.913971
+bc_loss_last=0.389810
+bc_acc_last=0.797872
+ppo_policy_last=-0.004435
+ppo_value_last=642.049805
+returns_mean=44.833333
