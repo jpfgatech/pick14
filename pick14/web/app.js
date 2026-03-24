@@ -1,15 +1,19 @@
 /**
- * Pick14 web UI — Unicode playing-card codepoints (emoji-style glyphs) + fetch API.
- * @see https://en.wikipedia.org/wiki/Playing_cards_in_Unicode
+ * Pick14 web client — select cards, then confirm one action.
  */
 
 const SUIT_NAMES = ["CLUB", "DIAMOND", "HEART", "BLADE"];
-
-/** Per-suit Ace code point (Unicode playing cards block). */
 const SUIT_BASE = [0x1f0d1, 0x1f0c1, 0x1f0b1, 0x1f0a1];
-
-const JOKER_RED = 0x1f0bf;
+const JOKER_RED = 0x1f0cf;
 const JOKER_BLACK = 0x1f0cf;
+
+let sessionId = null;
+const API_PREFIX = window.location.pathname.startsWith("/pick14") ? "/pick14" : "";
+
+let currentView = null;
+const selectedHand = new Set();
+let selectedPublic = null;
+let pollTimer = null;
 
 function rankOffset(rank) {
   if (rank === 1) return 0;
@@ -19,14 +23,6 @@ function rankOffset(rank) {
   if (rank === 12) return 12;
   if (rank === 13) return 13;
   return 0;
-}
-
-function cardGlyph(c) {
-  if (c.joker) {
-    return String.fromCodePoint(c.red ? JOKER_RED : JOKER_BLACK);
-  }
-  const base = SUIT_BASE[c.suit];
-  return String.fromCodePoint(base + rankOffset(c.rank));
 }
 
 function rankLabel(rank) {
@@ -43,17 +39,24 @@ function formatCardText(c) {
   return `${rankLabel(c.rank)} of ${SUIT_NAMES[c.suit] || "?"}`;
 }
 
-/** CSS hook: red = diamond+heart, black = club+spade (BLADE). */
-function cardToneClass(c) {
-  if (c.joker) return c.red ? "card-tone--joker-red" : "card-tone--joker-black";
-  if (c.suit === 1 || c.suit === 2) return "card-tone--red";
-  return "card-tone--black";
+// Kept for tests that look for function name
+function formatCard(c) {
+  return formatCardText(c);
+}
+
+function cardGlyph(c) {
+  if (c.joker) return String.fromCodePoint(c.red ? JOKER_RED : JOKER_BLACK);
+  return String.fromCodePoint(SUIT_BASE[c.suit] + rankOffset(c.rank));
+}
+
+function toneClass(c) {
+  if (c.joker) return c.red ? "card-tile--joker-red" : "card-tile--joker-black";
+  return c.suit === 1 || c.suit === 2 ? "card-tile--red" : "card-tile--black";
 }
 
 function scoreValue(c) {
   if (c.joker) return 5;
-  const m = { 0: 1, 1: 2, 2: 4, 3: 3 };
-  return m[c.suit] ?? 0;
+  return { 0: 1, 1: 2, 2: 4, 3: 3 }[c.suit] ?? 0;
 }
 
 function totalScorePile(cards) {
@@ -64,59 +67,6 @@ function setsAndPoints(points) {
   return [Math.floor(points / 4), points % 4];
 }
 
-/**
- * @param {object} c card dict from API
- * @param {{ small?: boolean, dealDelay?: number|null, extraClass?: string }} opts
- */
-function createCardVisual(c, opts = {}) {
-  const li = document.createElement("li");
-  li.className = "card-visual-wrap";
-  const face = document.createElement("div");
-  face.className =
-    "card-visual" + (opts.small ? " card-visual--sm" : "") + " " + cardToneClass(c);
-  if (opts.dealDelay != null && opts.dealDelay >= 0) {
-    face.classList.add("card-visual--deal");
-    face.style.setProperty("--deal-delay", `${opts.dealDelay}ms`);
-  }
-  if (opts.extraClass) face.classList.add(opts.extraClass);
-
-  const fb = document.createElement("span");
-  fb.className = "card-visual__fallback";
-  fb.textContent = formatCardText(c);
-  fb.setAttribute("aria-hidden", "true");
-
-  const glyph = document.createElement("span");
-  glyph.className = "card-visual__glyph";
-  glyph.textContent = cardGlyph(c);
-  glyph.setAttribute("aria-hidden", "true");
-
-  /* Fallback first in DOM so the glyph paints on top (was reversed → text covered the card character). */
-  face.appendChild(fb);
-  face.appendChild(glyph);
-  face.title = formatCardText(c);
-  face.setAttribute("role", "img");
-  face.setAttribute("aria-label", formatCardText(c));
-  li.appendChild(face);
-  return li;
-}
-
-function cardFaceElement(c, opts = {}) {
-  const wrap = createCardVisual(c, opts);
-  return wrap.firstElementChild;
-}
-
-function miniCardRow(cards) {
-  const span = document.createElement("span");
-  span.className = "move-mini-cards";
-  for (const c of cards) {
-    span.appendChild(cardFaceElement(c, { small: true }));
-  }
-  return span;
-}
-
-let sessionId = null;
-let dealAnimNext = false;
-let prevScoreLens = null;
 function setStatus(msg, isError) {
   const el = document.getElementById("status");
   el.textContent = msg || "";
@@ -144,180 +94,180 @@ async function api(method, path, body) {
   return data;
 }
 
-function renderCardRow(ul, cards, { deal } = {}) {
-  ul.innerHTML = "";
-  cards.forEach((c, i) => {
-    const delay = deal ? Math.min(i * 55, 800) : null;
-    ul.appendChild(createCardVisual(c, { dealDelay: delay }));
+function cardButton(c, { selectable, selected, publicSelected, onClick }) {
+  const li = document.createElement("li");
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "card-btn";
+  if (selectable) btn.classList.add("is-selectable");
+  if (selected) btn.classList.add("is-selected");
+  if (publicSelected) btn.classList.add("is-public-selected");
+  btn.disabled = !selectable;
+  if (onClick) btn.addEventListener("click", onClick);
+
+  const face = document.createElement("div");
+  face.className = `card-tile ${toneClass(c)}`;
+  face.setAttribute("role", "img");
+  face.setAttribute("aria-label", formatCardText(c));
+  face.title = formatCardText(c);
+
+  const fallback = document.createElement("span");
+  fallback.className = "card-tile__fallback";
+  fallback.textContent = formatCardText(c);
+
+  const glyph = document.createElement("span");
+  glyph.className = "card-tile__glyph";
+  glyph.textContent = cardGlyph(c);
+  glyph.setAttribute("aria-hidden", "true");
+
+  face.appendChild(fallback);
+  face.appendChild(glyph);
+  btn.appendChild(face);
+  li.appendChild(btn);
+  return li;
+}
+
+function renderCardLists() {
+  const view = currentView;
+  if (!view) return;
+  const state = view.state;
+  const hand = state.hands[0] || [];
+  const pub = state.public || [];
+  const active = view.current_player === 0 && !view.finished;
+
+  const handList = document.getElementById("handList");
+  handList.innerHTML = "";
+  hand.forEach((c, i) => {
+    handList.appendChild(
+      cardButton(c, {
+        selectable: active,
+        selected: selectedHand.has(i),
+        onClick: () => {
+          if (selectedHand.has(i)) selectedHand.delete(i);
+          else selectedHand.add(i);
+          syncActionPanel();
+          renderCardLists();
+        },
+      })
+    );
+  });
+
+  const publicList = document.getElementById("publicList");
+  publicList.innerHTML = "";
+  pub.forEach((c, i) => {
+    publicList.appendChild(
+      cardButton(c, {
+        selectable: active && !state.must_play_only,
+        publicSelected: selectedPublic === i,
+        onClick: () => {
+          selectedPublic = selectedPublic === i ? null : i;
+          syncActionPanel();
+          renderCardLists();
+        },
+      })
+    );
   });
 }
 
-function renderScores(state, { bumpPlayers } = {}) {
-  const ul = document.getElementById("scoreBoard");
-  const n = state.hands.length;
-  const lens = state.score_piles.map((p) => p.length);
-
+function renderScores(state) {
+  const ul = document.getElementById("scoreList");
   ul.innerHTML = "";
-  for (let i = 0; i < n; i++) {
+  for (let i = 0; i < state.hands.length; i++) {
     const li = document.createElement("li");
-    const pile = state.score_piles[i] || [];
-    const pts = totalScorePile(pile);
+    const pts = totalScorePile(state.score_piles[i] || []);
     const [sets, rem] = setsAndPoints(pts);
     const label = i === 0 ? "You" : `Player ${i}`;
-
-    li.innerHTML = `
-      <div class="score-line">
-        <span class="score-line__who">${label}</span>
-        <span class="score-line__total">${pts}</span>
-        <span class="score-line__meta">${sets} sets + ${rem} (4 pts = 1 set)</span>
-      </div>
-      <div class="score-cheat"></div>
-    `;
-    const cheat = li.querySelector(".score-cheat");
-    for (const c of pile) {
-      cheat.appendChild(cardFaceElement(c, { small: true }));
-    }
-    if (bumpPlayers && bumpPlayers.includes(i)) {
-      li.classList.add("score-bump");
-      setTimeout(() => li.classList.remove("score-bump"), 800);
-    }
+    li.textContent = `${label}: ${pts} pts (${sets} sets + ${rem})`;
     ul.appendChild(li);
   }
-
-  prevScoreLens = lens;
 }
 
-function scoreBumpIndices(state) {
-  const lens = state.score_piles.map((p) => p.length);
-  if (!prevScoreLens || prevScoreLens.length !== lens.length) return [];
-  const out = [];
-  for (let i = 0; i < lens.length; i++) {
-    if (lens[i] > prevScoreLens[i]) out.push(i);
-  }
-  return out;
+function arraysEqual(a, b) {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
 }
 
-function renderMoves(view) {
-  const moves = view.legal_moves || [];
-  const matchGroup = document.getElementById("matchGroup");
-  const playGroup = document.getElementById("playGroup");
-  const matchBtns = document.getElementById("matchButtons");
-  const playBtns = document.getElementById("playButtons");
-  matchBtns.innerHTML = "";
-  playBtns.innerHTML = "";
+function selectedAction() {
+  const view = currentView;
+  if (!view || view.current_player !== 0 || view.finished) return null;
+  const state = view.state;
+  const legal = view.legal_moves || [];
+  const hand = state.hands[0] || [];
+  const pub = state.public || [];
+  const handIdx = [...selectedHand].sort((a, b) => a - b);
 
-  const matches = moves.filter((m) => m.kind === "match");
-  const plays = moves.filter((m) => m.kind === "play");
-  const hand = view.state.hands[0] || [];
-  const pub = view.state.public || [];
-
-  if (matches.length && !view.state.must_play_only) {
-    matchGroup.hidden = false;
-    const skip = document.createElement("button");
-    skip.type = "button";
-    skip.className = "btn btn--move";
-    skip.textContent = "Skip matching — scroll to plays";
-    skip.addEventListener("click", () => playGroup.scrollIntoView({ behavior: "smooth", block: "nearest" }));
-    matchBtns.appendChild(skip);
-
-    matches.forEach((m, i) => {
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "btn btn--move";
-      const pubCard = pub[m.public_index];
-      const handCards = m.hand_indices.map((idx) => hand[idx]);
-      const cap = handCards.reduce((s, c) => s + scoreValue(c), 0) + scoreValue(pubCard);
-      const label = document.createElement("span");
-      label.textContent = `[${i + 1}] (${cap} pts) pick `;
-      btn.appendChild(label);
-      btn.appendChild(miniCardRow([pubCard]));
-      const mid = document.createElement("span");
-      mid.textContent = " using ";
-      btn.appendChild(mid);
-      btn.appendChild(miniCardRow(handCards));
-      btn.addEventListener("click", () => {
-        pulsePublicAndHand(m.public_index, m.hand_indices);
-        setTimeout(() => {
-          submitMove({ kind: "match", public_index: m.public_index, hand_indices: m.hand_indices });
-        }, 380);
-      });
-      matchBtns.appendChild(btn);
-    });
-  } else {
-    matchGroup.hidden = true;
+  if (selectedPublic != null) {
+    if (state.must_play_only) {
+      return { valid: false, summary: "Cannot match now; this turn requires a play to public." };
+    }
+    if (handIdx.length === 0) return { valid: false, summary: "Select one or more hand cards for match." };
+    const move = legal.find(
+      (m) => m.kind === "match" && m.public_index === selectedPublic && arraysEqual((m.hand_indices || []).slice().sort((a,b)=>a-b), handIdx)
+    );
+    if (!move) return { valid: false, summary: "Selected set is not a legal match (sum must be 14)." };
+    const cap = handIdx.reduce((s, i) => s + scoreValue(hand[i]), scoreValue(pub[selectedPublic]));
+    const cards = handIdx.map((i) => formatCardText(hand[i])).join(", ");
+    return {
+      valid: true,
+      payload: { kind: "match", public_index: selectedPublic, hand_indices: handIdx },
+      summary: `(${cap} pts) pick ${formatCardText(pub[selectedPublic])} by ${cards}`,
+    };
   }
 
-  if (plays.length) {
-    playGroup.hidden = false;
-    plays.forEach((m, i) => {
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "btn btn--move";
-      const c = hand[m.hand_index];
-      const lab = document.createElement("span");
-      lab.textContent = `[${i}] (${scoreValue(c)} pts) play `;
-      btn.appendChild(lab);
-      btn.appendChild(miniCardRow([c]));
-      btn.addEventListener("click", () => submitMove({ kind: "play", hand_index: m.hand_index }));
-      playBtns.appendChild(btn);
-    });
-  } else {
-    playGroup.hidden = true;
+  if (handIdx.length === 1) {
+    const idx = handIdx[0];
+    const move = legal.find((m) => m.kind === "play" && m.hand_index === idx);
+    if (!move) return { valid: false, summary: "That card cannot be played now." };
+    const pts = scoreValue(hand[idx]);
+    return {
+      valid: true,
+      payload: { kind: "play", hand_index: idx },
+      summary: `(${pts} pts) play ${formatCardText(hand[idx])}`,
+    };
   }
+
+  if (handIdx.length > 1) return { valid: false, summary: "To play, select exactly one hand card." };
+  return { valid: false, summary: "No action selected." };
 }
 
-function pulsePublicAndHand(pubIndex, handIndices) {
-  const pubLis = document.querySelectorAll("#publicList .card-visual");
-  const handLis = document.querySelectorAll("#handList .card-visual");
-  if (pubLis[pubIndex]) pubLis[pubIndex].classList.add("card-visual--match-pulse");
-  for (const idx of handIndices) {
-    if (handLis[idx]) handLis[idx].classList.add("card-visual--match-pulse");
+function syncActionPanel() {
+  const action = selectedAction();
+  const btn = document.getElementById("btnConfirmAction");
+  const info = document.getElementById("actionInfo");
+  if (!action) {
+    btn.disabled = true;
+    info.textContent = "No action selected.";
+    return;
   }
-  setTimeout(() => {
-    document.querySelectorAll(".card-visual--match-pulse").forEach((el) => el.classList.remove("card-visual--match-pulse"));
-  }, 600);
+  btn.disabled = !action.valid;
+  info.textContent = action.summary;
 }
 
-async function submitMove(payload) {
-  if (!sessionId) return;
+async function submitSelectedAction() {
+  const action = selectedAction();
+  if (!action || !action.valid) return;
   setStatus("…");
   try {
-    const view = await api("POST", `/sessions/${sessionId}/moves/human`, payload);
-    applyView(view, { afterMove: true });
+    const view = await api("POST", `${API_PREFIX}/sessions/${sessionId}/moves/human`, action.payload);
+    selectedHand.clear();
+    selectedPublic = null;
+    applyView(view);
     setStatus("");
   } catch (e) {
     setStatus(e.message || String(e), true);
   }
 }
 
-function triggerDeckShuffleAnim() {
-  const stage = document.getElementById("deckStage");
-  const backs = stage.querySelectorAll(".deck-card-back");
-  stage.hidden = false;
-  stage.classList.remove("deck--shuffling");
-  void stage.offsetWidth;
-  stage.classList.add("deck--shuffling");
-  backs.forEach((el, i) => {
-    el.style.setProperty("--tx", `${i * 3}px`);
-    el.style.setProperty("--ty", `${i * 2}px`);
-    el.style.setProperty("--rot", `${-4 + i * 3}deg`);
-  });
-  setTimeout(() => stage.classList.remove("deck--shuffling"), 1000);
-}
-
-function applyView(view, { afterMove = false, isNewGame = false } = {}) {
+function applyView(view) {
+  currentView = view;
   const st = view.state;
   document.getElementById("game").hidden = false;
   document.getElementById("finished").hidden = true;
 
-  const doDeal = isNewGame || dealAnimNext;
-  dealAnimNext = false;
-
-  const bumps = afterMove ? scoreBumpIndices(st) : [];
-
-  renderCardRow(document.getElementById("publicList"), st.public || [], { deal: doDeal });
-  renderCardRow(document.getElementById("handList"), st.hands[0] || [], { deal: doDeal });
-  renderScores(st, { bumpPlayers: bumps });
+  renderCardLists();
+  renderScores(st);
+  syncActionPanel();
 
   document.getElementById("mustPlay").hidden = !st.must_play_only;
 
@@ -326,46 +276,34 @@ function applyView(view, { afterMove = false, isNewGame = false } = {}) {
     document.getElementById("finished").hidden = false;
     const fs = document.getElementById("finalScores");
     fs.innerHTML = "";
-    const n = st.hands.length;
-    for (let i = 0; i < n; i++) {
+    for (let i = 0; i < st.hands.length; i++) {
       const pts = totalScorePile(st.score_piles[i] || []);
       const [sets, rem] = setsAndPoints(pts);
       const li = document.createElement("li");
-      const label = i === 0 ? "You" : `Player ${i}`;
-      li.textContent = `${label}: ${pts} points (${sets} sets and ${rem} points)`;
+      li.textContent = `${i === 0 ? "You" : `Player ${i}`}: ${pts} points (${sets} sets and ${rem} points)`;
       fs.appendChild(li);
     }
     return;
   }
 
   if (view.current_player !== 0) {
-    setStatus("Bots thinking…");
+    setStatus("Waiting for bots…");
     pollUntilHuman();
     return;
   }
-
-  renderMoves(view);
 }
-
-let pollTimer = null;
 
 function pollUntilHuman() {
   if (pollTimer) clearInterval(pollTimer);
   const sid = sessionId;
-  let n = 0;
   pollTimer = setInterval(async () => {
-    n += 1;
-    if (n > 50) {
-      clearInterval(pollTimer);
-      pollTimer = null;
-      setStatus("Stuck waiting — try Refresh.", true);
-      return;
-    }
     try {
-      const view = await api("GET", `/sessions/${sid}`);
+      const view = await api("GET", `${API_PREFIX}/sessions/${sid}`);
       if (view.finished || view.current_player === 0) {
         clearInterval(pollTimer);
         pollTimer = null;
+        selectedHand.clear();
+        selectedPublic = null;
         applyView(view);
         setStatus("");
       }
@@ -382,17 +320,14 @@ async function newGame() {
   const seedRaw = document.getElementById("seed").value.trim();
   const body = { num_players: n };
   if (seedRaw !== "") body.seed = parseInt(seedRaw, 10);
-
-  dealAnimNext = true;
-  prevScoreLens = null;
-  triggerDeckShuffleAnim();
-
-  setStatus("Dealing…");
+  setStatus("Starting…");
   try {
-    const data = await api("POST", "/sessions", body);
+    const data = await api("POST", `${API_PREFIX}/sessions`, body);
     sessionId = data.session_id;
+    selectedHand.clear();
+    selectedPublic = null;
     setStatus("");
-    applyView(data, { isNewGame: true });
+    applyView(data);
   } catch (e) {
     setStatus(e.message || String(e), true);
   }
@@ -402,9 +337,10 @@ async function regret() {
   if (!sessionId) return;
   setStatus("…");
   try {
-    const view = await api("POST", `/sessions/${sessionId}/regret`);
-    const rem = view.remaining_completed_segments;
-    setStatus(rem != null ? `${rem} older segment(s) still reversible` : "");
+    const view = await api("POST", `${API_PREFIX}/sessions/${sessionId}/regret`);
+    selectedHand.clear();
+    selectedPublic = null;
+    setStatus(view.remaining_completed_segments != null ? `${view.remaining_completed_segments} older segment(s) still reversible` : "");
     applyView(view);
   } catch (e) {
     setStatus(e.message || String(e), true);
@@ -415,6 +351,8 @@ async function refresh() {
   if (!sessionId) return;
   try {
     const view = await api("GET", `/sessions/${sessionId}`);
+    selectedHand.clear();
+    selectedPublic = null;
     applyView(view);
     setStatus("");
   } catch (e) {
@@ -426,11 +364,4 @@ document.getElementById("btnNew").addEventListener("click", newGame);
 document.getElementById("btnAgain").addEventListener("click", newGame);
 document.getElementById("btnRegret").addEventListener("click", regret);
 document.getElementById("btnRefresh").addEventListener("click", refresh);
-
-document.getElementById("cheatToggle").addEventListener("change", (e) => {
-  document.getElementById("scoreBoard").classList.toggle("cheat-on", e.target.checked);
-});
-
-document.getElementById("cardTextToggle").addEventListener("change", (e) => {
-  document.getElementById("app").classList.toggle("show-card-text", e.target.checked);
-});
+document.getElementById("btnConfirmAction").addEventListener("click", submitSelectedAction);

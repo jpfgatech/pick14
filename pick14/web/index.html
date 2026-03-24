@@ -5,23 +5,16 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#0f1419" />
     <title>Pick14</title>
-    <!-- One font request (not per card) — improves playing-card Unicode glyphs on some Linux/Android browsers -->
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Noto+Sans+Symbols+2&display=swap"
-      rel="stylesheet"
-    />
-    <link rel="stylesheet" href="/assets/styles.css" />
+    <link rel="stylesheet" href="assets/styles.css" />
   </head>
   <body>
     <div id="app" class="app">
       <header class="header">
         <h1 class="title">Pick14</h1>
-        <p class="tagline">Seat 0 — you · others · dummy agent · cards via Unicode playing-card glyphs</p>
+        <p class="tagline">Tap cards to select. Confirm once for play or match.</p>
       </header>
 
-      <section class="panel panel--setup" aria-label="New game">
+      <section class="panel panel--setup" id="setup" aria-label="New game">
         <div class="field-row">
           <label for="numPlayers">Players</label>
           <input id="numPlayers" type="number" min="2" max="8" value="2" inputmode="numeric" />
@@ -30,22 +23,8 @@
           <label for="seed">Seed <span class="hint">(optional)</span></label>
           <input id="seed" type="number" inputmode="numeric" placeholder="random" />
         </div>
-        <label class="field-row cheat-toggle" style="margin-top: 0.5rem">
-          <input type="checkbox" id="cardTextToggle" />
-          <span>Prefer text inside card tiles (if glyphs look empty)</span>
-        </label>
         <button type="button" class="btn btn--primary" id="btnNew">New game</button>
       </section>
-
-      <div class="deck-stage" id="deckStage" aria-hidden="true">
-        <div class="deck-stack" id="deckStack">
-          <div class="deck-card-back"></div>
-          <div class="deck-card-back"></div>
-          <div class="deck-card-back"></div>
-          <div class="deck-card-back"></div>
-        </div>
-        <span class="deck-label">Deck</span>
-      </div>
 
       <p class="status" id="status" role="status" aria-live="polite"></p>
 
@@ -53,36 +32,29 @@
         <div class="game-grid">
           <div class="card-block">
             <h2>Public pool</h2>
-            <ul class="card-row" id="publicList"></ul>
+            <ul class="card-list" id="publicList"></ul>
           </div>
           <div class="card-block">
             <h2>Your hand</h2>
-            <ul class="card-row" id="handList"></ul>
+            <ul class="card-list" id="handList"></ul>
           </div>
           <div class="card-block card-block--scores">
             <h2>Scores</h2>
-            <ul class="score-board" id="scoreBoard"></ul>
-            <label class="cheat-toggle">
-              <input type="checkbox" id="cheatToggle" />
-              Cheat: show captured cards (small)
-            </label>
+            <div class="confirm-row confirm-row--score">
+              <button type="button" class="btn btn--primary" id="btnConfirmAction" disabled>Confirm action</button>
+              <div class="action-info" id="actionInfo">No action selected.</div>
+            </div>
+            <ul class="score-list" id="scoreList"></ul>
           </div>
         </div>
 
         <div class="must-play" id="mustPlay" hidden>You must play one card to the public pool.</div>
 
-        <section class="actions" aria-label="Legal moves">
+        <section class="actions" aria-label="Action confirmation">
           <h2 class="actions__title">Your move</h2>
-          <div class="action-groups">
-            <div class="action-group" id="matchGroup" hidden>
-              <h3>Match <span class="hint">(optional)</span></h3>
-              <div class="btn-grid" id="matchButtons"></div>
-            </div>
-            <div class="action-group" id="playGroup" hidden>
-              <h3>Play from hand</h3>
-              <div class="btn-grid" id="playButtons"></div>
-            </div>
-          </div>
+          <p class="selection-help" id="selectionHelp">
+            Select one hand card to play, or select one public card + one or more hand cards to match.
+          </p>
         </section>
 
         <div class="toolbar">
@@ -97,6 +69,6 @@
         <button type="button" class="btn btn--primary" id="btnAgain">Play again</button>
       </section>
     </div>
-    <script src="/assets/app.js" defer></script>
+    <script src="assets/app.js" defer></script>
   </body>
 </html>
