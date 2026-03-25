@@ -8,12 +8,24 @@ import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
 
-from pick14.agent import choose_dummy_action, greedy_match_move
+from pick14.agent import greedy_match_move, stingy_play_move
 from pick14.engine import GameState, MatchMove, PlayMove, apply_move, is_finished, new_game, skip_empty_hands
-from pick14.rl.encoding import MAX_HAND_COMBOS, MAX_PUBLIC, HandCombo, build_hand_combos, build_public_vectors
+from pick14.rl.encoding import (
+    MAX_HAND_COMBOS,
+    MAX_PLAY_HAND,
+    MAX_PLAY_KEYS,
+    MAX_PUBLIC,
+    NUM_GLOBAL_PLAY_CONTEXT_KEYS,
+    HandCombo,
+    build_hand_combos,
+    build_public_vectors,
+    combo_vector,
+)
 
 
 def _run_bots_until_human_or_done(state: GameState) -> None:
+    from pick14.agent import choose_dummy_action
+
     for _ in range(1024):
         skip_empty_hands(state)
         if is_finished(state) or state.current_player == 0:
@@ -29,7 +41,11 @@ class EncodedState:
 
 
 class Pick14GymEnv(gym.Env):
-    """Single-agent seat-0 env with masked set-action head (rl_init.md style)."""
+    """
+    Seat-0 single-agent env.
+    Match phase: flat action over (hand_combo, public|pass) per rl_init.md.
+    Forced play phase: flat offset action = match_flat_dim + hand_index (stingy teacher, play head).
+    """
 
     metadata = {"render_modes": ["ansi"]}
 
@@ -42,16 +58,24 @@ class Pick14GymEnv(gym.Env):
         self.state: GameState | None = None
         self._last_encoded: EncodedState | None = None
 
-        # action = flatten(hand_combo_idx, key_idx) where key_idx in [public slots..., pass]
         self.max_keys = MAX_PUBLIC + 1
-        self.action_space = spaces.Discrete(MAX_HAND_COMBOS * self.max_keys)
+        self.match_flat_dim = MAX_HAND_COMBOS * self.max_keys
+        self.play_action_dim = MAX_PLAY_HAND
+        self.action_space = spaces.Discrete(self.match_flat_dim + self.play_action_dim)
+
         self.observation_space = spaces.Dict(
             {
+                "phase": spaces.Box(0.0, 1.0, shape=(1,), dtype=np.float32),
                 "hand_vecs": spaces.Box(-1e6, 1e6, shape=(MAX_HAND_COMBOS, 9), dtype=np.float32),
                 "hand_valid": spaces.MultiBinary(MAX_HAND_COMBOS),
                 "public_vecs": spaces.Box(-1e6, 1e6, shape=(MAX_PUBLIC, 9), dtype=np.float32),
                 "public_valid": spaces.MultiBinary(MAX_PUBLIC),
                 "mask": spaces.MultiBinary((MAX_HAND_COMBOS, self.max_keys)),
+                "play_hand_vecs": spaces.Box(-1e6, 1e6, shape=(MAX_PLAY_HAND, 9), dtype=np.float32),
+                "play_hand_valid": spaces.MultiBinary(MAX_PLAY_HAND),
+                "play_key_mask": spaces.Box(
+                    low=0, high=1, shape=(MAX_PLAY_HAND, MAX_PLAY_KEYS), dtype=np.int8
+                ),
                 "meta": spaces.Box(-1e6, 1e6, shape=(6,), dtype=np.float32),
             }
         )
@@ -72,18 +96,32 @@ class Pick14GymEnv(gym.Env):
         public_count = int(public_valid_bool.sum())
 
         mask = np.zeros((MAX_HAND_COMBOS, self.max_keys), dtype=np.int8)
+        play_hand_vecs = np.zeros((MAX_PLAY_HAND, 9), dtype=np.float32)
+        play_hand_valid = np.zeros((MAX_PLAY_HAND,), dtype=np.int8)
+        play_key_mask = np.zeros((MAX_PLAY_HAND, MAX_PLAY_KEYS), dtype=np.int8)
+        phase = np.array([1.0 if st.must_play_only else 0.0], dtype=np.float32)
+
         if st.current_player == 0 and not is_finished(st):
-            for i, combo in enumerate(hand_combos):
-                # Pass is always allowed in the network definition;
-                # env maps it to a legal play card from selected combo.
-                mask[i, public_count] = 1
-                if st.must_play_only:
-                    continue
-                combo_sum = float(combo.vec9[0])
-                for j in range(public_count):
-                    pub_sum = float(public_vecs[j, 0])
-                    if combo_sum + pub_sum == 14.0:
-                        mask[i, j] = 1
+            if st.must_play_only:
+                # Degenerate match mask: one legal cell so flattened match logits stay finite (unused for supervision).
+                mask[0, public_count] = 1
+                n = len(hand)
+                # Trailing key columns = learnable Global Play Context bank (rl_init.md).
+                for hi in range(min(n, MAX_PLAY_HAND)):
+                    play_hand_vecs[hi] = combo_vector([hand[hi]])
+                    play_hand_valid[hi] = 1
+                    for j in range(public_count):
+                        play_key_mask[hi, j] = 1
+                    for g in range(NUM_GLOBAL_PLAY_CONTEXT_KEYS):
+                        play_key_mask[hi, MAX_PUBLIC + g] = 1
+            else:
+                for i, combo in enumerate(hand_combos):
+                    mask[i, public_count] = 1
+                    combo_sum = float(combo.vec9[0])
+                    for j in range(public_count):
+                        pub_sum = float(public_vecs[j, 0])
+                        if combo_sum + pub_sum == 14.0:
+                            mask[i, j] = 1
 
         meta = np.array(
             [
@@ -97,11 +135,15 @@ class Pick14GymEnv(gym.Env):
             dtype=np.float32,
         )
         obs = {
+            "phase": phase,
             "hand_vecs": hand_vecs,
             "hand_valid": hand_valid,
             "public_vecs": public_vecs,
             "public_valid": public_valid,
             "mask": mask,
+            "play_hand_vecs": play_hand_vecs,
+            "play_hand_valid": play_hand_valid,
+            "play_key_mask": play_key_mask,
             "meta": meta,
         }
         return EncodedState(obs=obs, hand_combos=hand_combos, public_count=public_count)
@@ -110,51 +152,74 @@ class Pick14GymEnv(gym.Env):
         if seed is not None:
             self._rng = Random(seed)
         elif self.base_seed is not None:
-            # keep deterministic sequence across resets when seeded in ctor
             self._rng = Random(self._rng.random())
         self.state = new_game(self.num_players, rng=self._rng, n_hand=self.n_hand)
         _run_bots_until_human_or_done(self.state)
         self._last_encoded = self._encode()
         return self._last_encoded.obs, {"legal_mask": self._last_encoded.obs["mask"]}
 
-    def _decode_action(self, action: int) -> tuple[int, int]:
+    def _decode_match_action(self, action: int) -> tuple[int, int]:
         q = int(action) // self.max_keys
         k = int(action) % self.max_keys
         return q, k
 
-    def _apply_decoded(self, q: int, k: int) -> tuple[float, bool]:
+    def _apply_match_decoded(self, q: int, k: int) -> tuple[float, bool]:
         assert self.state is not None and self._last_encoded is not None
         st = self.state
         enc = self._last_encoded
         mask = enc.obs["mask"]
         if q < 0 or q >= MAX_HAND_COMBOS or k < 0 or k >= self.max_keys or mask[q, k] == 0:
-            # Illegal chosen action => strong penalty, continue.
             return -1.0, False
 
         combo = enc.hand_combos[q]
         score_before = sum(len(p) for p in st.score_piles)
         if k == enc.public_count:
-            # Pass branch: select a legal single-card play from the chosen combo.
-            # If combo is multi-card, use lowest hand index.
             play_idx = min(combo.hand_indices)
             apply_move(st, PlayMove(play_idx))
         else:
             apply_move(st, MatchMove(k, combo.hand_indices))
-            # If forced follow-up play is active, auto-play smallest index from remaining hand.
-            if st.must_play_only and st.current_player == 0 and st.hands[0]:
-                apply_move(st, PlayMove(0))
 
         _run_bots_until_human_or_done(st)
         score_after = sum(len(p) for p in st.score_piles)
-        # Dense reward: captured-cards delta in all piles approximates points progress.
+        reward = float(score_after - score_before)
+        done = is_finished(st)
+        return reward, done
+
+    def _apply_play_decoded(self, hand_index: int) -> tuple[float, bool]:
+        assert self.state is not None and self._last_encoded is not None
+        st = self.state
+        enc = self._last_encoded
+        if not st.must_play_only:
+            return -1.0, False
+        hand = st.hands[0]
+        if hand_index < 0 or hand_index >= len(hand) or hand_index >= MAX_PLAY_HAND:
+            return -1.0, False
+        if enc.obs["play_hand_valid"][hand_index] != 1:
+            return -1.0, False
+
+        score_before = sum(len(p) for p in st.score_piles)
+        apply_move(st, PlayMove(hand_index))
+        _run_bots_until_human_or_done(st)
+        score_after = sum(len(p) for p in st.score_piles)
         reward = float(score_after - score_before)
         done = is_finished(st)
         return reward, done
 
     def step(self, action: int):
         assert self.state is not None
-        q, k = self._decode_action(int(action))
-        reward, done = self._apply_decoded(q, k)
+        self._last_encoded = self._encode()
+        enc = self._last_encoded
+        obs0 = enc.obs
+        a = int(action)
+        play_phase = float(obs0["phase"][0]) >= 0.5
+        if play_phase:
+            if a < self.match_flat_dim:
+                return obs0, -1.0, False, False, {"legal_mask": obs0["mask"]}
+            reward, done = self._apply_play_decoded(a - self.match_flat_dim)
+        else:
+            if a >= self.match_flat_dim:
+                return obs0, -1.0, False, False, {"legal_mask": obs0["mask"]}
+            reward, done = self._apply_match_decoded(*self._decode_match_action(a))
         self._last_encoded = self._encode()
         obs = self._last_encoded.obs
         terminated = bool(done)
@@ -170,24 +235,27 @@ class Pick14GymEnv(gym.Env):
         )
 
     def teacher_action(self) -> int:
-        """Map greedy teacher move to rl_init flattened action index."""
         assert self.state is not None
         if self.state.current_player != 0 or is_finished(self.state):
             return 0
         enc = self._encode()
         self._last_encoded = enc
-        teacher = greedy_match_move(self.state)
+        st = self.state
+
+        if st.must_play_only:
+            pm = stingy_play_move(st)
+            return self.match_flat_dim + int(pm.hand_index)
+
+        teacher = greedy_match_move(st)
         if teacher is not None:
             hand_set = tuple(sorted(teacher.hand_indices))
             for qi, combo in enumerate(enc.hand_combos):
                 if combo.hand_indices == hand_set:
                     return qi * self.max_keys + teacher.public_index
-        # fallback to play: deterministic smallest hand index.
-        hand = self.state.hands[0]
+        hand = st.hands[0]
         best_idx = min(range(len(hand)), key=lambda i: i)
         pass_k = enc.public_count
         for qi, combo in enumerate(enc.hand_combos):
             if combo.hand_indices == (best_idx,):
                 return qi * self.max_keys + pass_k
         return pass_k
-

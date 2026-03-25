@@ -9,6 +9,11 @@ from pick14.cards import Card, game_value, score_value
 
 MAX_HAND_COMBOS = 7
 MAX_PUBLIC = 16
+# Max hand size during forced play (match makeup can temporarily hold n_hand+1 cards).
+MAX_PLAY_HAND = 4
+# Learnable global play-context keys (rl_init.md); one slot per public column plus these.
+NUM_GLOBAL_PLAY_CONTEXT_KEYS = 32
+MAX_PLAY_KEYS = MAX_PUBLIC + NUM_GLOBAL_PLAY_CONTEXT_KEYS
 
 
 @dataclass(frozen=True, slots=True)

@@ -12,7 +12,8 @@ from torch.distributions import Categorical
 from torch.utils.data import DataLoader, Dataset
 
 from pick14.rl.env import Pick14GymEnv
-from pick14.rl.model import PointerPolicyNet
+from pick14.rl.model import DualHeadPolicyNet
+from pick14.rl.train_bc_static import MAX_KEYS, dual_bc_loss
 
 
 def to_torch_batch(batch: dict[str, np.ndarray], device: torch.device) -> dict[str, torch.Tensor]:
@@ -60,7 +61,16 @@ def collect_teacher_samples(env: Pick14GymEnv, episodes: int, max_steps: int = 2
     return out
 
 
-def run_bc(model: PointerPolicyNet, dataset: TeacherDataset, device: torch.device, epochs: int, batch_size: int, lr: float):
+def run_bc(
+    model: DualHeadPolicyNet,
+    dataset: TeacherDataset,
+    device: torch.device,
+    epochs: int,
+    batch_size: int,
+    lr: float,
+    match_flat_dim: int,
+    play_loss_weight: float = 2.0,
+):
     dl = DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=collate)
     opt = torch.optim.Adam(model.parameters(), lr=lr)
     loss_hist: list[float] = []
@@ -68,26 +78,53 @@ def run_bc(model: PointerPolicyNet, dataset: TeacherDataset, device: torch.devic
     model.train()
     for _ in range(epochs):
         ep_loss = 0.0
-        ok = 0
+        ok = 0.0
         n = 0
         for obs_np, actions_np, _ in dl:
             obs = to_torch_batch(obs_np, device)
             actions = torch.as_tensor(actions_np, device=device)
-            logits, _ = model(obs)
-            loss = F.cross_entropy(logits, actions)
+            match_logits, play_logits, _ = model(obs)
+            loss, st = dual_bc_loss(
+                match_logits,
+                play_logits,
+                actions,
+                obs,
+                match_flat_dim=match_flat_dim,
+                max_keys=MAX_KEYS,
+                play_loss_weight=play_loss_weight,
+            )
             opt.zero_grad()
             loss.backward()
             opt.step()
             ep_loss += float(loss.item()) * actions.shape[0]
-            pred = logits.argmax(dim=1)
-            ok += int((pred == actions).sum().item())
+            ok += st["overall_acc"] * float(actions.shape[0])
             n += int(actions.shape[0])
         loss_hist.append(ep_loss / max(1, n))
         acc_hist.append(ok / max(1, n))
     return loss_hist, acc_hist
 
 
-def rollout_policy(env: Pick14GymEnv, model: PointerPolicyNet, device: torch.device, episodes: int):
+def _policy_logp_entropy(
+    model: DualHeadPolicyNet, obs_t: dict[str, torch.Tensor], actions_t: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    mlog, plog, values = model(obs_t)
+    mfd = model.match_flat_dim
+    phase_m = obs_t["phase"].squeeze(1) < 0.5
+    logp_m = F.log_softmax(mlog, dim=1)
+    logp_p = F.log_softmax(plog, dim=1)
+    gm = logp_m.gather(1, actions_t.unsqueeze(1).clamp(max=mlog.shape[1] - 1)).squeeze(1)
+    rel = (actions_t - mfd).clamp(min=0, max=plog.shape[1] - 1)
+    gp = logp_p.gather(1, rel.unsqueeze(1)).squeeze(1)
+    logp = torch.where(phase_m, gm, gp)
+    p_m = torch.softmax(mlog, dim=1)
+    h_m = -(p_m * logp_m).sum(dim=1)
+    p_p = torch.softmax(plog, dim=1)
+    h_p = -(p_p * logp_p).sum(dim=1)
+    entropy = torch.where(phase_m, h_m, h_p)
+    return logp, entropy, values
+
+
+def rollout_policy(env: Pick14GymEnv, model: DualHeadPolicyNet, device: torch.device, episodes: int):
     traj = []
     returns = []
     for ep in range(episodes):
@@ -98,10 +135,16 @@ def rollout_policy(env: Pick14GymEnv, model: PointerPolicyNet, device: torch.dev
         while not done and steps < 256:
             obs_t = {k: torch.as_tensor(v, device=device).unsqueeze(0) for k, v in obs.items()}
             with torch.no_grad():
-                logits, value = model(obs_t)
-                dist = Categorical(logits=logits)
-                action = int(dist.sample().item())
-                logp = float(dist.log_prob(torch.tensor([action], device=device)).item())
+                mlog, plog, value = model(obs_t)
+                if float(obs["phase"][0]) < 0.5:
+                    dist = Categorical(logits=mlog)
+                    action = int(dist.sample().item())
+                    logp = float(dist.log_prob(torch.tensor([action], device=device)).item())
+                else:
+                    dist = Categorical(logits=plog)
+                    sub = int(dist.sample().item())
+                    action = sub + model.match_flat_dim
+                    logp = float(dist.log_prob(torch.tensor([sub], device=device)).item())
                 val = float(value.item())
             next_obs, rew, term, trunc, _ = env.step(action)
             traj.append((obs, action, rew, logp, val, float(term or trunc)))
@@ -114,7 +157,7 @@ def rollout_policy(env: Pick14GymEnv, model: PointerPolicyNet, device: torch.dev
 
 
 def ppo_update(
-    model: PointerPolicyNet,
+    model: DualHeadPolicyNet,
     traj,
     device: torch.device,
     gamma: float = 0.99,
@@ -149,15 +192,13 @@ def ppo_update(
 
     model.train()
     for _ in range(ppo_epochs):
-        logits, values = model(obs_t)
-        dist = Categorical(logits=logits)
-        logp = dist.log_prob(actions_t)
+        logp, entropy_vec, values = _policy_logp_entropy(model, obs_t, actions_t)
         ratio = torch.exp(logp - old_logp_t)
         surr1 = ratio * adv_t
         surr2 = torch.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps) * adv_t
         policy_loss = -torch.min(surr1, surr2).mean()
         value_loss = F.mse_loss(values, ret_t)
-        entropy = dist.entropy().mean()
+        entropy = entropy_vec.mean()
         loss = policy_loss + 0.5 * value_loss - 0.01 * entropy
 
         opt.zero_grad()
@@ -226,7 +267,8 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     env = Pick14GymEnv(num_players=3, n_hand=3, seed=123)
-    model = PointerPolicyNet(max_hand_combos=7, max_keys=17).to(device)
+    model = DualHeadPolicyNet(max_hand_combos=7, max_match_keys=MAX_KEYS).to(device)
+    mfd = env.match_flat_dim
 
     print("[1/4] Collecting teacher data...")
     samples = collect_teacher_samples(env, episodes=args.episodes_teacher)
@@ -234,7 +276,16 @@ def main():
     print(f"  samples={len(ds)}")
 
     print("[2/4] Behavior cloning...")
-    bc_loss, bc_acc = run_bc(model, ds, device, epochs=args.bc_epochs, batch_size=args.bc_batch, lr=1e-3)
+    bc_loss, bc_acc = run_bc(
+        model,
+        ds,
+        device,
+        epochs=args.bc_epochs,
+        batch_size=args.bc_batch,
+        lr=1e-3,
+        match_flat_dim=mfd,
+        play_loss_weight=2.0,
+    )
     print(f"  final bc_loss={bc_loss[-1]:.4f} acc={bc_acc[-1]:.4f}")
 
     print("[3/4] PPO bootstrap rollout/update...")

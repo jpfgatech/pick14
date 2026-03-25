@@ -3,6 +3,7 @@ import pytest
 
 pytest.importorskip("gymnasium")
 
+from pick14.rl.encoding import MAX_PLAY_HAND, MAX_PLAY_KEYS
 from pick14.rl.env import Pick14GymEnv
 
 
@@ -12,6 +13,9 @@ def test_env_reset_shapes_and_mask():
     assert obs["hand_vecs"].shape == (7, 9)
     assert obs["public_vecs"].shape[1] == 9
     assert obs["mask"].shape[0] == 7
+    assert obs["phase"].shape == (1,)
+    assert obs["play_hand_vecs"].shape == (MAX_PLAY_HAND, 9)
+    assert obs["play_key_mask"].shape == (MAX_PLAY_HAND, MAX_PLAY_KEYS)
     assert info["legal_mask"].shape == obs["mask"].shape
     assert obs["mask"].sum() > 0
 
@@ -20,9 +24,13 @@ def test_teacher_action_is_legal_after_reset():
     env = Pick14GymEnv(num_players=3, n_hand=3, seed=2)
     obs, _ = env.reset(seed=2)
     action = env.teacher_action()
-    q = action // env.max_keys
-    k = action % env.max_keys
-    assert obs["mask"][q, k] == 1
+    if float(obs["phase"][0]) < 0.5:
+        q = action // env.max_keys
+        k = action % env.max_keys
+        assert obs["mask"][q, k] == 1
+    else:
+        hi = action - env.match_flat_dim
+        assert obs["play_hand_valid"][hi] == 1
 
 
 def test_step_returns_valid_tuple():
@@ -37,3 +45,23 @@ def test_step_returns_valid_tuple():
     assert next_obs["mask"].shape == obs["mask"].shape
     assert info["legal_mask"].shape == obs["mask"].shape
 
+
+def test_play_phase_teacher_and_step_respect_encoding():
+    env = Pick14GymEnv(num_players=3, n_hand=3, seed=1)
+    obs, _ = env.reset(seed=1)
+    for _ in range(400):
+        if float(obs["phase"][0]) >= 0.5:
+            a = env.teacher_action()
+            assert a >= env.match_flat_dim
+            hi = a - env.match_flat_dim
+            assert int(obs["play_hand_valid"][hi]) == 1
+            obs2, r, term, trunc, _ = env.step(a)
+            assert r > -0.5
+            assert not (term and trunc)
+            return
+        a = env.teacher_action()
+        assert a < env.match_flat_dim
+        obs, _, term, trunc, _ = env.step(a)
+        if term or trunc:
+            break
+    pytest.skip("did not reach forced play phase in step budget")
