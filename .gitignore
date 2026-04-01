@@ -13,3 +13,6 @@ build/
 htmlcov/
 .venv/
 venv/
+
+# Regenerated training outputs (keep artifacts/README.md)
+artifacts/*/
