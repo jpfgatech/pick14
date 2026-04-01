@@ -16,6 +16,40 @@ The state is represented as a sequence of Card Sets (tokens). Each token embeds 
 * **Role Encoding:** A maximum of 4 type encodings are used: `Self`, `Pool`, and `Opponent`. In games with $>3$ players, all opponents except for the one acting after agent are aggregated under the `Opponent 2` encoding to represent the collective long-term threat. Initialize the Embedding as 8 LUT entries to support potential expansion, e.g. more players or deck/used cards.
 * **Tokenization:** Each card set is converted into a vector containing zero-padded digits/points, total card count, and summed values. This is projected into a $32$-dimensional token. The Card token and Role token are added element-wise: $\text{Embedding} = \text{Card}_{32} + \text{Role}_{32}$.
 
+
+### 1.3 Card rules
+* The digit of a card is its number. with A/J/Q/K/Joker counted as 1/11/12/13/5
+* The point of a card is determined by its suit, with heart/space/diamond/club/joker as 4/3/2/1/5
+
+### 1.4 Winning state
+* The points scored by a player is the sum of point of all cards in his score pile
+* The player scoring more points than opponents wins. Tie is allowed
+
+### 1.5 Dummy / seat-bot strategies
+
+Composable **match** policy (match sub-phase) and **play** policy (PLAY sub-phase). Reference implementations live in ``pick14.rl.sim_core`` and are wired via ``pick14.rl.agents.CompositeSeatAgent``.
+
+#### Match (choose a legal 14-sum pairing, or pass)
+
+* **Greedy-for-public (baseline match):** prioritize the **public pool card’s suit/joker point** first, then total capture points to the score pile, then most hand cards used, then first legal match in enumeration.
+* **Greedy (classic):** maximize total capture points first; tie-breaks: (1) most hand cards, (2) maximize the **public** card’s point value, (3) first legal match.
+* **Always pass:** never claim a match; take ``PassMatch`` and proceed to PLAY (§1.1 L7→L9).
+
+#### Play (discard one hand card to the pool)
+
+* **Caution (baseline play):** prefer the discard with **largest game digit** first, then **lower** suit/joker point among ties, then lower hand index. (Keeps low-digit “safe” cards in hand longer when points tie.)
+* **Stingy (classic):** minimize the discarded card’s **suit/joker point**; tie-break: maximize **game digit**, then lower hand index.
+
+#### Default bundle
+
+* **Baseline (recommended for BC teacher, env expert, and curriculum):** **Greedy-for-public match + Caution play**. Head-to-head matrices (``scripts/rl_strategy_matrix.py``, ``artifacts/rl_strategy_matrix/``) are seed-dependent; this bundle consistently beats greedy–stingy and stingy-play variants and is typically among the top two caution-play rows (often trading small margins with greedy–stingy–caution, which shares the same play policy).
+* The historical **greedy–stingy** bundle remains available for ablations (`greedy_stingy_seat` in code).
+
+### 1.6 Game Bench
+
+* The RL environment shall support multiple players.
+* For each action phase, the full state of the game shall be recorded, including hidden information e.g. used cards or ordered deck to be dealt
+
 ---
 
 ## 2. Neural Network Architecture
