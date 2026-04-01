@@ -18,7 +18,10 @@ from pick14.rl import rlmd_sequences as seq
 from pick14.rl.rlmd_sequences import NUM_ROLE_TYPES
 from pick14.rl.sim_core import (
     MAX_PUBLIC_SLOTS,
+    RlPick14State,
     TurnPhase,
+    build_match_legality_mask,
+    build_play_legality_mask,
     is_finished,
     max_hand_slots,
     max_match_combo_slots,
@@ -75,6 +78,47 @@ def encode_rlmd_tensors_for_env(env: Any) -> dict[str, np.ndarray]:
     mm = build_mask_match_matrix(env)
     pv = build_play_valid(env)
     phase = np.array([seq.phase_obs_scalar(st)], dtype=np.float32)
+
+    return {
+        "seq_agent_feats": af,
+        "seq_agent_roles": ar,
+        "seq_agent_mask": am,
+        "seq_critic_feats": cf,
+        "seq_critic_roles": cr,
+        "seq_critic_mask": cm,
+        "mask_match": mm,
+        "play_hand_valid": pv,
+        "phase": phase,
+    }
+
+
+def encode_rlmd_post_play_from_state(
+    state: RlPick14State,
+    learning_player: int,
+    n_hand: int,
+) -> dict[str, np.ndarray]:
+    """
+    Same tensor bundle as :func:`encode_rlmd_post_play` for an arbitrary ``RlPick14State``
+    (e.g. counterfactual discards). Does not require a :class:`~pick14.rl.env.Pick14GymEnv`.
+    """
+    lp = learning_player
+    opp = 1 if lp == 0 else 0
+
+    af, ar, am = seq.encode_agent_play(state, lp, n_hand)
+    cf, cr, cm = seq.encode_critic_play(state, lp, opp, n_hand)
+
+    rows = max_match_combo_slots(n_hand)
+    if state.phase != TurnPhase.MATCH or is_finished(state):
+        mm = np.zeros((rows + 1, MAX_PUBLIC_SLOTS), dtype=np.int8)
+    else:
+        mm = np.asarray(build_match_legality_mask(state)[0], dtype=np.int8)
+
+    slots = max_hand_slots(n_hand)
+    pv = np.zeros((slots,), dtype=np.int8)
+    pm = np.asarray(build_play_legality_mask(state), dtype=np.int8)
+    pv[: min(len(pm), slots)] = pm[:slots]
+
+    phase = np.array([seq.phase_obs_scalar(state)], dtype=np.float32)
 
     return {
         "seq_agent_feats": af,

@@ -90,12 +90,12 @@ The Play Head selects a single card to discard from the hand.
 
 ### 3.3 Multi-Critic Heads (God-Mode)
 To prevent gradient thrashing between the Agent's exploratory policy and the Opponent's baseline logic, two independent Critic networks evaluate the $(N+32) \times 32$ omniscient sequence.
-1.  **Critic-Agent:** Evaluates $S_{pre\_match}$ to predict the point gap prior to the Agent's turn.
-2.  **Critic-Opponent:** Evaluates $S_{post\_play}$ to predict the point gap prior to the Opponent's turn.
+1.  **Critic-Agent ($V_{agent}$):** Consumes $S_{pre\_match}$ (same instant as the Match actor). **Pretrain / bootstrap:** MSE vs the immediate atomic match reward $A_t$ (learning seat’s score-pile **point** gain from that match step; $0$ on pass). **Full RL (§4):** predicts $G_{match}^{(t)}$.
+2.  **Critic-Opponent ($V_{opp}$):** Consumes $S_{post\_play}$ (after the learning seat’s discard, before opponent autoplay). **Pretrain / bootstrap:** for each legal discard $a$, evaluate $V_{opp}$ on the counterfactual $S_{post\_play}(a)$; minimize MSE$\big(\sum_a \pi(a)\,V_{opp}(S_{post\_play}(a)),\,-O_t\big)$ with $\pi$ from the Play actor (softmax over legal slots, **detached** in critic-only training) and $O_t$ = total non-learning seats’ score-pile point gain until control returns (so the target is $r_{play}=-O_t$ from §4.1). **Full RL (§4):** $V_{opp}$ predicts $G_{play}^{(t)}$; §4.3’s Play-advantage EV baseline uses the same $\sum_a \pi(a)\,V_{opp}(\cdot)$ construction.
 3.  **Funnel & Output (Both Critics):**
     * Average the $(N+32)$ tokens along the sequence dimension to produce a $1 \times 32$ summary vector (`Mean Pooling`).
     * Pass through a Multi-Layer Perceptron: `Linear(32, 16)` $\rightarrow$ `ReLU` $\rightarrow$ `Linear(16, 1)`.
-    * No final activation is applied, allowing for continuous positive, zero, or negative point gap predictions.
+    * No final activation is applied; outputs are unconstrained reals (match pretrain targets are nonnegative; play EV targets are often $\le 0$ because $r_{play}=-O_t$).
 
 ---
 
