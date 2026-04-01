@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import BatchSampler, DataLoader, Dataset
 
 from pick14.rl.env import Pick14GymEnv
 from pick14.rl.rlmd_model import RLmdPPOAgent
@@ -98,6 +98,10 @@ def dual_bc_loss(
     """
     Per-sample mean objective: match grouped BC on match-phase rows, CE on play-phase rows.
     play_loss_weight upweights play gradient (rarer steps) without changing reported per-phase accuracies.
+
+    curriculum.md §1.2: Match and Play share token embeddings and Transformer L1, so each *optimizer step*
+    must see a **mixed** batch (both phases) whenever possible — use ``MixedPhaseBatchSampler`` on the
+    train loader, not separate match-only / play-only epochs.
     """
     device = actions.device
     phase_match = obs_t["phase"].squeeze(1) < 0.5
@@ -134,8 +138,8 @@ def dual_bc_loss(
         z = torch.tensor(0.0, device=device)
         return z, {
             "overall_acc": 1.0,
-            "match_acc": 1.0,
-            "play_acc": 1.0,
+            "match_acc": float("nan"),
+            "play_acc": float("nan"),
             "match_n": 0.0,
             "play_n": 0.0,
         }
@@ -147,8 +151,8 @@ def dual_bc_loss(
     overall_n = float(bsz)
     stats = {
         "overall_acc": overall_ok / max(1.0, overall_n),
-        "match_acc": (match_ok / match_n) if match_n > 0 else 1.0,
-        "play_acc": (play_ok / play_n) if play_n > 0 else 1.0,
+        "match_acc": (match_ok / match_n) if match_n > 0 else float("nan"),
+        "play_acc": (play_ok / play_n) if play_n > 0 else float("nan"),
         "match_n": match_n,
         "play_n": play_n,
     }
@@ -215,8 +219,8 @@ def _accum_epoch(model, dl, opt, device: torch.device, match_flat_dim: int, trai
     out = {
         "loss": sum_loss / denom,
         "acc_overall": sum_overall_ok / max(1.0, sum_overall_n),
-        "acc_match": (sum_m_ok / sum_m_n) if sum_m_n > 0 else 1.0,
-        "acc_play": (sum_p_ok / sum_p_n) if sum_p_n > 0 else 1.0,
+        "acc_match": (sum_m_ok / sum_m_n) if sum_m_n > 0 else float("nan"),
+        "acc_play": (sum_p_ok / sum_p_n) if sum_p_n > 0 else float("nan"),
     }
     return out
 
@@ -247,6 +251,120 @@ def split_samples(samples: list[Sample], test_ratio: float, seed: int):
     return train, test
 
 
+def split_samples_stratified(samples: list[Sample], test_ratio: float, seed: int) -> tuple[list[Sample], list[Sample]]:
+    """
+    Hold out ~test_ratio of **match** rows and ~test_ratio of **play** rows separately.
+
+    A single random shuffle of all timesteps often leaves the train and test sets with very different
+    play/match counts; play accuracy can then look fine on test (few, easy rows) while train play acc is
+    much lower. Stratifying keeps both splits representative of both phases.
+    """
+    rng = np.random.default_rng(seed)
+    mi = [i for i, s in enumerate(samples) if float(s.obs["phase"][0]) < 0.5]
+    pi = [i for i, s in enumerate(samples) if float(s.obs["phase"][0]) >= 0.5]
+    rng.shuffle(mi)
+    rng.shuffle(pi)
+
+    def split_part(idxs: list[int]) -> tuple[list[int], list[int]]:
+        n = len(idxs)
+        if n == 0:
+            return [], []
+        n_test = max(1, int(round(n * test_ratio)))
+        n_test = min(n_test, n - 1) if n > 1 else 0
+        if n_test <= 0:
+            return idxs, []
+        te = idxs[:n_test]
+        tr = idxs[n_test:]
+        return tr, te
+
+    tr_m, te_m = split_part(mi)
+    tr_p, te_p = split_part(pi)
+    # If one phase had too few rows, test for that phase can be empty; move some train → test.
+    if not te_p and len(tr_p) > 8:
+        n_mv = max(1, min(len(tr_p) - 1, int(round(len(tr_p) * test_ratio))))
+        te_p = tr_p[:n_mv]
+        tr_p = tr_p[n_mv:]
+    if not te_m and len(tr_m) > 8:
+        n_mv = max(1, min(len(tr_m) - 1, int(round(len(tr_m) * test_ratio))))
+        te_m = tr_m[:n_mv]
+        tr_m = tr_m[n_mv:]
+
+    train_idx = tr_m + tr_p
+    test_idx = te_m + te_p
+    rng.shuffle(train_idx)
+    rng.shuffle(test_idx)
+    return [samples[i] for i in train_idx], [samples[i] for i in test_idx]
+
+
+class MixedPhaseBatchSampler(BatchSampler):
+    """
+    Yields batches that include both match-phase and play-phase indices whenever both exist and batch_size >= 2,
+    so each gradient step updates shared embeddings / layer1 from both heads (curriculum.md §1.2).
+    """
+
+    def __init__(self, samples: list[Sample], batch_size: int, seed: int):
+        self.match_idx = [i for i, s in enumerate(samples) if float(s.obs["phase"][0]) < 0.5]
+        self.play_idx = [i for i, s in enumerate(samples) if float(s.obs["phase"][0]) >= 0.5]
+        self.batch_size = batch_size
+        self.seed = seed
+        self._epoch = 0
+
+    def __len__(self) -> int:
+        n = len(self.match_idx) + len(self.play_idx)
+        return max(1, (n + self.batch_size - 1) // self.batch_size)
+
+    def __iter__(self):
+        rng = np.random.default_rng((self.seed + self._epoch * 10007) & 0xFFFFFFFF)
+        self._epoch += 1
+        m = np.asarray(self.match_idx, dtype=np.int64)
+        p = np.asarray(self.play_idx, dtype=np.int64)
+        rng.shuffle(m)
+        rng.shuffle(p)
+        mi, pi = 0, 0
+        B = self.batch_size
+        while mi < len(m) or pi < len(p):
+            if len(p) == 0:
+                while mi < len(m):
+                    chunk = m[mi : mi + B].tolist()
+                    mi += B
+                    if chunk:
+                        yield chunk
+                break
+            if len(m) == 0:
+                while pi < len(p):
+                    chunk = p[pi : pi + B].tolist()
+                    pi += B
+                    if chunk:
+                        yield chunk
+                break
+            rem_m, rem_p = len(m) - mi, len(p) - pi
+            need = min(B, rem_m + rem_p)
+            # At least one play row when possible (shared trunk needs both phases in the step).
+            n_play = 0
+            if rem_p > 0 and B >= 2:
+                share = rem_p / max(1, rem_m + rem_p)
+                n_play = max(1, min(rem_p, need - 1, int(round(B * share)) or 1))
+            elif rem_p > 0:
+                n_play = min(rem_p, need)
+            n_play = min(n_play, rem_p, need)
+            n_match = min(rem_m, need - n_play)
+            if n_match == 0 and rem_m > 0:
+                n_match = min(rem_m, need - n_play)
+            if n_play == 0 and rem_p > 0 and n_match < need:
+                n_play = min(rem_p, need - n_match)
+            batch = m[mi : mi + n_match].tolist() + p[pi : pi + n_play].tolist()
+            mi += n_match
+            pi += n_play
+            while len(batch) < need and mi < len(m):
+                batch.append(int(m[mi]))
+                mi += 1
+            while len(batch) < need and pi < len(p):
+                batch.append(int(p[pi]))
+                pi += 1
+            if batch:
+                yield batch
+
+
 def train_static_bc(
     samples: list[Sample],
     epochs: int,
@@ -257,11 +375,22 @@ def train_static_bc(
     match_flat_dim: int,
     play_loss_weight: float,
     hidden_dim: int = 32,
+    *,
+    stratified_split: bool = True,
+    mixed_train_batches: bool = True,
+    test_ratio: float = 0.2,
 ):
-    train_samples, test_samples = split_samples(samples, test_ratio=0.2, seed=seed)
+    if stratified_split:
+        train_samples, test_samples = split_samples_stratified(samples, test_ratio=test_ratio, seed=seed)
+    else:
+        train_samples, test_samples = split_samples(samples, test_ratio=test_ratio, seed=seed)
     train_ds = ImitationDataset(train_samples)
     test_ds = ImitationDataset(test_samples)
-    train_dl = DataLoader(train_ds, batch_size=batch, shuffle=True, collate_fn=collate)
+    if mixed_train_batches and len(train_samples) >= 2:
+        train_bs = MixedPhaseBatchSampler(train_samples, batch_size=batch, seed=seed)
+        train_dl = DataLoader(train_ds, batch_sampler=train_bs, collate_fn=collate)
+    else:
+        train_dl = DataLoader(train_ds, batch_size=batch, shuffle=True, collate_fn=collate)
     test_dl = DataLoader(test_ds, batch_size=batch, shuffle=False, collate_fn=collate)
 
     _ = hidden_dim  # kept for CLI backward compatibility (rl.md uses fixed D=32)
@@ -289,8 +418,9 @@ def train_static_bc(
         hist["test_acc_match"].append(te["acc_match"])
         hist["train_acc_play"].append(tr["acc_play"])
         hist["test_acc_play"].append(te["acc_play"])
+    train_nm, train_np = phase_counts(train_samples)
     test_nm, test_np = phase_counts(test_samples)
-    return model, hist, len(train_ds), len(test_ds), test_nm, test_np
+    return model, hist, len(train_ds), len(test_ds), train_nm, train_np, test_nm, test_np
 
 
 def save_plots(out_dir: Path, hist: dict[str, list[float]], size_curve: list[tuple[int, float]]):
@@ -472,7 +602,7 @@ def main():
             samples_cache.extend(collect_teacher_samples(env, episodes=need, seed_base=seed_base + len(samples_cache)))
             episodes_collected += need
 
-        model, hist, n_train, n_test, test_nm, test_np = train_static_bc(
+        model, hist, n_train, n_test, tr_nm, tr_np, test_nm, test_np = train_static_bc(
             samples=samples_cache,
             epochs=args.epochs,
             batch=args.batch,
@@ -493,7 +623,7 @@ def main():
         drop = (loss_first - loss_last) / max(1e-9, loss_first)
         print(
             f"  eps={eps:4d} train={n_train:5d} test={n_test:5d} "
-            f"test_nm={test_nm:4d} test_np={test_np:3d} "
+            f"tr_nm={tr_nm:5d} tr_np={tr_np:4d} test_nm={test_nm:4d} test_np={test_np:3d} "
             f"test_overall={te_o:.4f} test_match={te_m:.4f} test_play={te_p:.4f} "
             f"test_loss_drop={drop:.2%}"
         )

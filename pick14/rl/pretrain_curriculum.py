@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,6 +19,16 @@ from torch.utils.data import DataLoader, Dataset
 from pick14.rl.env import Pick14GymEnv
 from pick14.rl.rlmd_model import RLmdPPOAgent
 from pick14.rl.train_bc_static import Sample, collect_teacher_samples, train_static_bc
+
+
+def _sanitize_json(x):
+    if isinstance(x, float) and (math.isnan(x) or math.isinf(x)):
+        return None
+    if isinstance(x, list):
+        return [_sanitize_json(v) for v in x]
+    if isinstance(x, dict):
+        return {k: _sanitize_json(v) for k, v in x.items()}
+    return x
 
 
 def _to_torch_obs(obs: dict[str, np.ndarray], device: torch.device) -> dict[str, torch.Tensor]:
@@ -162,7 +173,32 @@ def main():
     ap.add_argument("--bc-epochs", type=int, default=16)
     ap.add_argument("--bc-batch", type=int, default=128)
     ap.add_argument("--bc-lr", type=float, default=1e-3)
+    ap.add_argument("--bc-test-ratio", type=float, default=0.2, help="Held-out fraction per phase (match vs play stratified).")
     ap.add_argument("--play-loss-weight", type=float, default=2.0)
+    ap.add_argument(
+        "--min-train-play-acc",
+        type=float,
+        default=0.98,
+        help="Abort if final train play-head accuracy is below this (requires enough train play labels).",
+    )
+    ap.add_argument(
+        "--min-test-play-acc",
+        type=float,
+        default=0.98,
+        help="Abort if final test play-head accuracy is below this (requires enough test play labels).",
+    )
+    ap.add_argument(
+        "--min-train-play-labels",
+        type=int,
+        default=32,
+        help="Minimum play-phase rows in the train split to enforce --min-train-play-acc.",
+    )
+    ap.add_argument(
+        "--min-test-play-labels",
+        type=int,
+        default=32,
+        help="Minimum play-phase rows in the test split to enforce --min-test-play-acc.",
+    )
     ap.add_argument("--critic-rollout-episodes", type=int, default=400)
     ap.add_argument("--critic-epochs", type=int, default=8)
     ap.add_argument("--critic-batch", type=int, default=64)
@@ -176,9 +212,18 @@ def main():
     env = Pick14GymEnv(num_players=2, n_hand=3, seed=args.seed)
     mfd = env.match_flat_dim
 
-    print("[Phase 1] Mixed BC (greedy match + stingy play teacher)")
+    print("[Phase 1] Mixed BC (greedy match + stingy play teacher; stratified split + mixed batches per curriculum.md §1.2)")
     samples: list[Sample] = collect_teacher_samples(env, episodes=args.bc_episodes, seed_base=1000)
-    model, hist_bc, n_tr, n_te, _, _ = train_static_bc(
+    total_nm, total_np = (
+        sum(1 for s in samples if float(s.obs["phase"][0]) < 0.5),
+        sum(1 for s in samples if float(s.obs["phase"][0]) >= 0.5),
+    )
+    print(
+        f"  dataset: {len(samples)} timesteps from {args.bc_episodes} teacher episodes "
+        f"(~{total_nm} match-phase, ~{total_np} play-phase labels)",
+        flush=True,
+    )
+    model, hist_bc, n_tr, n_te, tr_nm, tr_np, te_nm, te_np = train_static_bc(
         samples=samples,
         epochs=args.bc_epochs,
         batch=args.bc_batch,
@@ -188,8 +233,51 @@ def main():
         match_flat_dim=mfd,
         play_loss_weight=args.play_loss_weight,
         hidden_dim=32,
+        test_ratio=args.bc_test_ratio,
     )
-    print(f"  train={n_tr} test={n_te} last test acc overall={hist_bc['test_acc_overall'][-1]:.4f}")
+    bc_sizes = {
+        "teacher_episodes": args.bc_episodes,
+        "total_timesteps": len(samples),
+        "total_match_labels": total_nm,
+        "total_play_labels": total_np,
+        "train_timesteps": n_tr,
+        "test_timesteps": n_te,
+        "train_match_labels": tr_nm,
+        "train_play_labels": tr_np,
+        "test_match_labels": te_nm,
+        "test_play_labels": te_np,
+        "bc_epochs": args.bc_epochs,
+        "bc_batch": args.bc_batch,
+    }
+    print(
+        f"  split: train={n_tr} (match={tr_nm}, play={tr_np}) | test={n_te} (match={te_nm}, play={te_np}) | "
+        f"last acc train_play={hist_bc['train_acc_play'][-1]} test_play={hist_bc['test_acc_play'][-1]} "
+        f"test_overall={hist_bc['test_acc_overall'][-1]:.4f}",
+        flush=True,
+    )
+
+    tr_p = hist_bc["train_acc_play"][-1]
+    te_p = hist_bc["test_acc_play"][-1]
+    if tr_np < args.min_train_play_labels:
+        raise SystemExit(
+            f"Too few train play-phase labels ({tr_np} < {args.min_train_play_labels}); "
+            "increase --bc-episodes so play-head accuracy is meaningful."
+        )
+    if te_np < args.min_test_play_labels:
+        raise SystemExit(
+            f"Too few test play-phase labels ({te_np} < {args.min_test_play_labels}); "
+            "increase --bc-episodes or lower --bc-test-ratio slightly."
+        )
+    if isinstance(tr_p, float) and not math.isnan(tr_p) and tr_p < args.min_train_play_acc:
+        raise SystemExit(
+            f"Train play accuracy {tr_p:.4f} < {args.min_train_play_acc}; "
+            "increase --bc-epochs / --bc-episodes or tune --play-loss-weight."
+        )
+    if isinstance(te_p, float) and not math.isnan(te_p) and te_p < args.min_test_play_acc:
+        raise SystemExit(
+            f"Test play accuracy {te_p:.4f} < {args.min_test_play_acc}; "
+            "increase --bc-epochs / --bc-episodes or tune --play-loss-weight."
+        )
 
     print("[Phase 2] Freeze actors, critic MSE on policy rollouts")
     crit_hist = train_critics_mse(
@@ -213,11 +301,15 @@ def main():
         "model": model.state_dict(),
         "hist_bc": hist_bc,
         "hist_critic": crit_hist,
+        "bc_data_sizes": bc_sizes,
         "config": vars(args),
         "match_flat_dim": mfd,
     }
     torch.save(ckpt, out_dir / "checkpoint_curriculum.pt")
-    (out_dir / "summary.json").write_text(json.dumps({"bc": hist_bc, "critic": crit_hist, "config": vars(args)}, indent=2))
+    summary_payload = _sanitize_json(
+        {"bc": hist_bc, "critic": crit_hist, "bc_data_sizes": bc_sizes, "config": vars(args)}
+    )
+    (out_dir / "summary.json").write_text(json.dumps(summary_payload, indent=2, allow_nan=False))
     print(f"Saved {out_dir / 'checkpoint_curriculum.pt'}")
 
 
