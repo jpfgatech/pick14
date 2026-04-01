@@ -1,7 +1,0 @@
-best_teacher_episodes=120
-best_test_match_rate=0.992308
-final_train_loss=0.050067
-final_test_loss=0.043257
-final_train_acc=0.984674
-final_test_acc=0.992308
-size_curve=[(120, 0.9923076923076923)]
