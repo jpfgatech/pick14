@@ -18,7 +18,7 @@ import math
 from itertools import cycle
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import numpy as np
 import torch
@@ -240,6 +240,101 @@ def critic_match_obs_has_scoring_legal(obs: dict[str, np.ndarray], *, pass_row: 
         return False
     scoring = mm[:pass_row, :]
     return bool(scoring.reshape(-1).astype(bool).any())
+
+
+def filter_match_rows_scoring_legal(
+    rows: list[tuple[dict[str, np.ndarray], float]],
+    *,
+    pass_row: int,
+) -> list[tuple[dict[str, np.ndarray], float]]:
+    return [r for r in rows if critic_match_obs_has_scoring_legal(r[0], pass_row=pass_row)]
+
+
+def summarize_match_a_t_distribution(
+    rows: list[tuple[dict[str, np.ndarray], float]],
+    *,
+    pass_row: int,
+) -> dict[str, Any]:
+    """Histogram of ``A_t`` on scoring-legal rows (``int(round(A_t))`` bins)."""
+    elig = filter_match_rows_scoring_legal(rows, pass_row=pass_row)
+    from collections import Counter
+
+    c: Counter[int] = Counter()
+    for _o, t in elig:
+        c[int(round(float(t)))] += 1
+    return {
+        "n_eligible": len(elig),
+        "bins_int": dict(sorted(c.items())),
+    }
+
+
+def _copy_match_row(r: tuple[dict[str, np.ndarray], float]) -> tuple[dict[str, np.ndarray], float]:
+    o, t = r
+    return ({k: np.asarray(v).copy() for k, v in o.items()}, float(t))
+
+
+def enrich_match_rows_scoring_legal(
+    rows: list[tuple[dict[str, np.ndarray], float]],
+    *,
+    pass_row: int,
+    boost_values: Sequence[float],
+    min_count_boost: int,
+    min_per_int_bin: int,
+    seed: int,
+) -> tuple[list[tuple[dict[str, np.ndarray], float]], dict[str, Any]]:
+    """
+    Keep all scoring-legal rows, then duplicate (copied obs) to lift rare ``A_t`` bins.
+
+    - ``boost_values``: explicit targets (e.g. 2 and 12) to bring up to ``min_count_boost`` each.
+    - ``min_per_int_bin``: every integer-rounded ``A_t`` with at least one row is upsampled to this count.
+    """
+    rng = np.random.default_rng(seed)
+    elig = filter_match_rows_scoring_legal(rows, pass_row=pass_row)
+    out = [_copy_match_row(r) for r in elig]
+    meta: dict[str, Any] = {
+        "n_eligible_base": len(elig),
+        "boost_values": list(boost_values),
+        "min_count_boost": int(min_count_boost),
+        "min_per_int_bin": int(min_per_int_bin),
+        "missing_boost": [],
+        "n_added": 0,
+    }
+    if not elig:
+        meta["n_after"] = 0
+        return out, meta
+
+    from collections import defaultdict
+
+    by_int: dict[int, list[tuple[dict[str, np.ndarray], float]]] = defaultdict(list)
+    for r in elig:
+        k = int(round(float(r[1])))
+        by_int[k].append(r)
+
+    def add_copies(pool: list[tuple[dict[str, np.ndarray], float]], need: int) -> None:
+        nonlocal out
+        if need <= 0 or not pool:
+            return
+        for _ in range(need):
+            out.append(_copy_match_row(rng.choice(pool)))
+        meta["n_added"] += need
+
+    for v in boost_values:
+        vk = int(round(float(v)))
+        pool = by_int.get(vk, [])
+        short = max(0, min_count_boost - len(pool))
+        if short > 0 and not pool:
+            meta["missing_boost"].append(float(v))
+            continue
+        add_copies(pool, short)
+
+    if min_per_int_bin > 0:
+        for _k, pool in by_int.items():
+            short = max(0, min_per_int_bin - len(pool))
+            add_copies(pool, short)
+
+    meta["n_after"] = len(out)
+    meta["bins_after"] = summarize_match_a_t_distribution(out, pass_row=pass_row)["bins_int"]
+    return out, meta
 
 
 def _play_ev_loss(
@@ -538,6 +633,97 @@ def train_joint_bc_critic_static(
         hist["loss_bc"].append(sum_bc / max(1, n_steps))
         hist["loss_m"].append(sum_m / max(1, n_steps))
         hist["loss_p"].append(sum_p / max(1, n_steps))
+        hist["loss_total"].append(sum_tot / max(1, n_steps))
+
+    return hist
+
+
+def train_joint_bc_match_masked_static(
+    model: RLmdPPOAgent,
+    train_samples: list[Sample],
+    match_rows: list[tuple[dict[str, np.ndarray], float]],
+    device: torch.device,
+    *,
+    epochs: int,
+    bc_batch: int,
+    critic_batch: int,
+    lr_actor: float,
+    lr_critic: float,
+    w_bc: float,
+    w_match: float,
+    match_flat_dim: int,
+    pass_row: int,
+    public_slots: int,
+    play_loss_weight: float,
+    seed: int,
+) -> dict[str, list[float]]:
+    """
+    Joint BC + match critic only (no play-EV term). Match MSE uses **scoring-legal** rows only
+    (``mask_match[:pass_row]``); pass-only rows in a batch are omitted from ``l_m``; if none valid,
+    ``l_m`` is a detached zero (no critic grad that step).
+    """
+    model.train()
+    for p in model.parameters():
+        p.requires_grad = True
+    model.set_requires_grad_actor_trunk(True)
+    model.set_requires_grad_critics(True)
+
+    train_ds = ImitationDataset(train_samples)
+    train_bs = MixedPhaseBatchSampler(train_samples, batch_size=bc_batch, seed=seed)
+    train_dl = DataLoader(train_ds, batch_sampler=train_bs, collate_fn=collate)
+    dl_m = None
+    if match_rows:
+        bs_m = min(critic_batch, len(match_rows))
+        dl_m = DataLoader(
+            CriticDataset(match_rows), batch_size=bs_m, shuffle=True, collate_fn=collate_critic
+        )
+    opt = torch.optim.Adam(critic_actor_param_groups(model, lr_critic, lr_actor))
+    hist: dict[str, list[float]] = {k: [] for k in ("loss_bc", "loss_m", "loss_p", "loss_total")}
+
+    for ep in range(epochs):
+        match_cycle = cycle(dl_m) if dl_m is not None else None
+        sum_bc = sum_m = sum_tot = 0.0
+        n_steps = 0
+        for obs_np, actions_np in train_dl:
+            obs_t = bc_to_torch(obs_np, device)
+            actions_t = torch.as_tensor(actions_np, device=device, dtype=torch.long)
+            ml, pl, _, _ = model(obs_t)
+            l_bc, _ = dual_bc_loss(
+                ml,
+                pl,
+                actions_t,
+                obs_t,
+                match_flat_dim,
+                pass_row,
+                public_slots,
+                play_loss_weight,
+            )
+
+            l_m = torch.tensor(0.0, device=device)
+            if match_cycle is not None:
+                m_obs, m_tgt = next(match_cycle)
+                m_obs_t = {k: torch.as_tensor(v, device=device) for k, v in m_obs.items()}
+                y = torch.as_tensor(m_tgt, device=device, dtype=torch.float32)
+                B = int(y.shape[0])
+                combo = m_obs_t["mask_match"][:, :pass_row, :].reshape(B, -1).bool()
+                valid = combo.any(dim=1)
+                if valid.any():
+                    _, _, va, _ = model(m_obs_t)
+                    l_m = F.mse_loss(va[valid], y[valid])
+
+            loss = w_bc * l_bc + w_match * l_m
+            opt.zero_grad(set_to_none=True)
+            loss.backward()
+            opt.step()
+
+            sum_bc += float(l_bc.detach().item())
+            sum_m += float(l_m.detach().item())
+            sum_tot += float(loss.detach().item())
+            n_steps += 1
+
+        hist["loss_bc"].append(sum_bc / max(1, n_steps))
+        hist["loss_m"].append(sum_m / max(1, n_steps))
+        hist["loss_p"].append(0.0)
         hist["loss_total"].append(sum_tot / max(1, n_steps))
 
     return hist

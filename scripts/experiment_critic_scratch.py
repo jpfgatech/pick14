@@ -36,6 +36,7 @@ from pick14.rl.pretrain_curriculum import (
     _play_ev_loss,
     collate_critic,
     critic_match_obs_has_scoring_legal,
+    filter_match_rows_scoring_legal,
     load_critic_bundle,
 )
 from pick14.rl.sim_core import max_match_combo_slots
@@ -73,14 +74,6 @@ def count_match_rows_pass_only(
         1 for o, _t in match_rows if not critic_match_obs_has_scoring_legal(o, pass_row=pass_row)
     )
     return n_skip, len(match_rows)
-
-
-def filter_match_rows_scoring_legal(
-    match_rows: list[tuple[dict[str, np.ndarray], float]],
-    *,
-    pass_row: int,
-) -> list[tuple[dict[str, np.ndarray], float]]:
-    return [r for r in match_rows if critic_match_obs_has_scoring_legal(r[0], pass_row=pass_row)]
 
 
 def train_critics_masked_match_frozen_trunk(
