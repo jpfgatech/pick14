@@ -56,6 +56,17 @@ def full_deck() -> list[Card]:
     return out
 
 
+# Stable identity 0..53 for tensor observations (same order as ``full_deck()``).
+CANONICAL_DECK_ORDER: tuple[Card, ...] = tuple(full_deck())
+assert len(CANONICAL_DECK_ORDER) == 54
+CARD_CANONICAL_INDEX: dict[Card, int] = {c: i for i, c in enumerate(CANONICAL_DECK_ORDER)}
+
+
+def canonical_card_index(card: Card) -> int:
+    """Index of this physical card in the fixed 54-card ordering."""
+    return CARD_CANONICAL_INDEX[card]
+
+
 def game_value(card: Card) -> int:
     """Point value used when building sums to 14 (A=1 … K=13, jokers=5)."""
     if card.is_joker:
