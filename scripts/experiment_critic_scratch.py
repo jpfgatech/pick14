@@ -2,10 +2,11 @@
 """
 Experiment: fresh critic heads, actor + shared trunk frozen from an existing checkpoint.
 
-Match-critic MSE skips batch rows with no legal ``mask_match`` (all zeros): no backward through
-those rows (equivalent to zero contribution; we do not target V=0 on them).
+Match-critic MSE skips rows where only **pass** is legal: we require a legal cell in combo rows
+``0 .. pass_row-1`` (``pass_row = max_match_combo_slots(n_hand)``). Pass row is excluded because
+pass is almost always available in match phase.
 
-Play-critic training unchanged. Then writes the same ~400-point scatter as ``plot_critic_scatter.py``.
+Play-critic training unchanged. Scatter subsamples from match rows that pass the same filter.
 
 Run from repo root: ``python scripts/experiment_critic_scratch.py``
 """
@@ -34,9 +35,10 @@ from pick14.rl.pretrain_curriculum import (
     PlayCriticEVRow,
     _play_ev_loss,
     collate_critic,
-    critic_match_obs_has_legal_action,
+    critic_match_obs_has_scoring_legal,
     load_critic_bundle,
 )
+from pick14.rl.sim_core import max_match_combo_slots
 from pick14.rl.rlmd_model import RLmdPPOAgent
 from pick14.rl.rlmd_transformer import RLmdEncoderLayer
 
@@ -61,11 +63,24 @@ def freeze_shared_and_actor(model: RLmdPPOAgent) -> None:
         p.requires_grad = any(x in name for x in critic_frag)
 
 
-def count_match_rows_no_legal(
+def count_match_rows_pass_only(
     match_rows: list[tuple[dict[str, np.ndarray], float]],
+    *,
+    pass_row: int,
 ) -> tuple[int, int]:
-    n0 = sum(1 for o, _t in match_rows if not critic_match_obs_has_legal_action(o))
-    return n0, len(match_rows)
+    """Returns (count without scoring-legal, total)."""
+    n_skip = sum(
+        1 for o, _t in match_rows if not critic_match_obs_has_scoring_legal(o, pass_row=pass_row)
+    )
+    return n_skip, len(match_rows)
+
+
+def filter_match_rows_scoring_legal(
+    match_rows: list[tuple[dict[str, np.ndarray], float]],
+    *,
+    pass_row: int,
+) -> list[tuple[dict[str, np.ndarray], float]]:
+    return [r for r in match_rows if critic_match_obs_has_scoring_legal(r[0], pass_row=pass_row)]
 
 
 def train_critics_masked_match_frozen_trunk(
@@ -76,6 +91,8 @@ def train_critics_masked_match_frozen_trunk(
     epochs: int,
     batch: int,
     lr: float,
+    *,
+    pass_row: int,
 ) -> dict[str, list[float]]:
     model.train()
     freeze_shared_and_actor(model)
@@ -94,8 +111,9 @@ def train_critics_masked_match_frozen_trunk(
                 obs_t = {k: torch.as_tensor(v, device=device) for k, v in obs_np.items()}
                 y = torch.as_tensor(tgt_np, device=device, dtype=torch.float32)
                 B = int(y.shape[0])
-                mm = obs_t["mask_match"].reshape(B, -1).bool()
-                valid = mm.any(dim=1)
+                mm = obs_t["mask_match"]
+                combo = mm[:, :pass_row, :].reshape(B, -1).bool()
+                valid = combo.any(dim=1)
                 if not valid.any():
                     continue
                 _, _, va, _ = model(obs_t)
@@ -156,18 +174,21 @@ def write_scatter(
     out_path: Path,
     n_each: int,
     seed: int,
+    *,
+    pass_row: int,
 ) -> None:
     rng = np.random.default_rng(seed)
     model.eval()
-    n_m = min(n_each, len(mr))
+    mr_f = filter_match_rows_scoring_legal(mr, pass_row=pass_row)
+    n_m = min(n_each, len(mr_f))
     n_p = min(n_each, len(pr))
-    mi = rng.choice(len(mr), size=n_m, replace=len(mr) < n_m) if mr else np.array([], dtype=int)
+    mi = rng.choice(len(mr_f), size=n_m, replace=len(mr_f) < n_m) if mr_f else np.array([], dtype=int)
     pi_ix = rng.choice(len(pr), size=n_p, replace=len(pr) < n_p) if pr else np.array([], dtype=int)
 
     y_match: list[float] = []
     pred_match: list[float] = []
     for j in mi:
-        obs, tgt = mr[int(j)]
+        obs, tgt = mr_f[int(j)]
         batch = collate_critic([(obs, tgt)])
         obs_np, y_np = batch
         obs_t = {k: torch.as_tensor(v, device=device) for k, v in obs_np.items()}
@@ -188,7 +209,7 @@ def write_scatter(
             axes[0],
             np.asarray(y_match, dtype=np.float64),
             np.asarray(pred_match, dtype=np.float64),
-            f"Match: V_agent vs A_t (n={len(y_match)})",
+            f"Match: V_agent vs A_t (n={len(y_match)}, scoring-legal only)",
         ),
         (
             axes[1],
@@ -211,7 +232,7 @@ def write_scatter(
         ax.legend(loc="upper left", fontsize=8)
 
     fig.suptitle(
-        f"Scratch critic + frozen trunk/actor | masked match rows\n{bundle_name} | meta={meta}",
+        f"Scratch critic + frozen trunk/actor | match rows with scoring combo legal\n{bundle_name} | meta={meta}",
         fontsize=10,
     )
     fig.tight_layout()
@@ -251,10 +272,13 @@ def main() -> None:
     model.load_state_dict(ckpt["model"])
 
     mr, pr, meta = load_critic_bundle(bundle_path)
-    n_bad, n_tot = count_match_rows_no_legal(mr)
+    pass_row = max_match_combo_slots(model.n_hand)
+    n_skip, n_tot = count_match_rows_pass_only(mr, pass_row=pass_row)
+    mr_elig = len(filter_match_rows_scoring_legal(mr, pass_row=pass_row))
     print(
-        f"Match rows with no legal mask_match: {n_bad}/{n_tot} "
-        f"({100.0 * n_bad / max(1, n_tot):.2f}%) — excluded from match-critic loss",
+        f"Match rows pass-only (no legal scoring combo; pass row={pass_row} excluded): "
+        f"{n_skip}/{n_tot} ({100.0 * n_skip / max(1, n_tot):.2f}%) — skipped for match-critic | "
+        f"eligible={mr_elig}",
         flush=True,
     )
 
@@ -272,6 +296,7 @@ def main() -> None:
         epochs=args.epochs,
         batch=args.batch,
         lr=args.lr,
+        pass_row=pass_row,
     )
     print(
         f"Last epoch loss_m={hist['loss_m'][-1]:.6f} loss_p={hist['loss_p'][-1]:.6f} "
@@ -287,7 +312,11 @@ def main() -> None:
             "hist_critic_scratch": hist,
             "source_checkpoint": str(ckpt_path),
             "critic_bundle": str(bundle_path),
-            "match_mask_skip_note": "match MSE rows with all-zero mask_match skipped (no backward)",
+            "match_mask_skip_note": (
+                "match MSE skips rows with no legal scoring combo (mask_match[:pass_row,:] all zero; "
+                "pass row excluded)"
+            ),
+            "pass_row": pass_row,
         },
         out_ckpt,
     )
@@ -303,6 +332,7 @@ def main() -> None:
         Path(args.out_plot),
         n_each=args.n_each,
         seed=args.seed + 1,
+        pass_row=pass_row,
     )
 
 

@@ -228,6 +228,20 @@ def critic_match_obs_has_legal_action(obs: dict[str, np.ndarray]) -> bool:
     return bool(mm.reshape(-1).astype(bool).any())
 
 
+def critic_match_obs_has_scoring_legal(obs: dict[str, np.ndarray], *, pass_row: int) -> bool:
+    """
+    True if some **combo** cell is legal (rows ``0 .. pass_row-1``).
+
+    Row index ``pass_row`` is the pass row (``env._max_match_combos`` / ``max_match_combo_slots(n_hand)``);
+    it is excluded because pass is almost always legal when in match phase.
+    """
+    mm = np.asarray(obs["mask_match"])
+    if mm.ndim != 2 or mm.shape[0] < pass_row:
+        return False
+    scoring = mm[:pass_row, :]
+    return bool(scoring.reshape(-1).astype(bool).any())
+
+
 def _play_ev_loss(
     model: RLmdPPOAgent,
     device: torch.device,
