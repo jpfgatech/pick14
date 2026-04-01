@@ -45,6 +45,7 @@ from pick14.rl.train_bc_static import (
     collect_teacher_samples,
     dual_bc_loss,
     eval_epoch,
+    phase_counts,
     split_samples_stratified,
     to_torch as bc_to_torch,
     train_static_bc,
@@ -608,6 +609,16 @@ def main():
         default=256,
         help="Batch size for BC re-check on held-out samples after Phase 2 (actors unchanged when frozen).",
     )
+    ap.add_argument(
+        "--resume-checkpoint",
+        type=str,
+        default="",
+        help=(
+            "Load model (and BC history) from a prior checkpoint_curriculum.pt; skip Phase 1 BC training. "
+            "Use the same --seed and --bc-episodes as the original run so the teacher split matches. "
+            "Typical with --critic-static-in and --phase2-joint for more joint epochs on the same bundle."
+        ),
+    )
     args = ap.parse_args()
 
     out_dir = Path(args.out_dir)
@@ -635,21 +646,66 @@ def main():
         f"(~{total_nm} match-phase, ~{total_np} play-phase labels)",
         flush=True,
     )
-    model, hist_bc, n_tr, n_te, tr_nm, tr_np, te_nm, te_np, test_samples = train_static_bc(
-        samples=samples,
-        epochs=args.bc_epochs,
-        batch=args.bc_batch,
-        lr=args.bc_lr,
-        device=device,
-        seed=args.seed,
-        match_flat_dim=mfd,
-        play_loss_weight=args.play_loss_weight,
-        hidden_dim=32,
-        test_ratio=args.bc_test_ratio,
-        env=base_env,
-        pass_row=pass_row,
-        public_slots=MAX_PUBLIC_SLOTS,
-    )
+    resume_path = (args.resume_checkpoint or "").strip()
+    ckpt_prev: dict[str, Any] | None = None
+    if resume_path:
+        rp = Path(resume_path)
+        if not rp.is_file():
+            raise SystemExit(f"--resume-checkpoint not found: {rp.resolve()}")
+        ckpt_prev = torch.load(rp, map_location=device, weights_only=False)
+        train_samples, test_samples = split_samples_stratified(
+            samples, test_ratio=args.bc_test_ratio, seed=args.seed
+        )
+        n_tr, n_te = len(train_samples), len(test_samples)
+        tr_nm, tr_np = phase_counts(train_samples)
+        te_nm, te_np = phase_counts(test_samples)
+        model = RLmdPPOAgent.from_env(base_env, dropout=0.0).to(device)
+        model.load_state_dict(ckpt_prev["model"])
+        hist_bc = ckpt_prev["hist_bc"]
+        print(f"[Phase 1] skipped (resume) — loaded model from {rp.resolve()}", flush=True)
+        gate_bs = args.post_bc_eval_batch
+        tr_dl = DataLoader(
+            ImitationDataset(train_samples),
+            batch_size=gate_bs,
+            shuffle=False,
+            collate_fn=collate,
+        )
+        te_dl = DataLoader(
+            ImitationDataset(test_samples),
+            batch_size=gate_bs,
+            shuffle=False,
+            collate_fn=collate,
+        )
+        tr_eval = eval_epoch(
+            model, tr_dl, device, mfd, args.play_loss_weight, pass_row, MAX_PUBLIC_SLOTS
+        )
+        te_eval = eval_epoch(
+            model, te_dl, device, mfd, args.play_loss_weight, pass_row, MAX_PUBLIC_SLOTS
+        )
+        tr_m, tr_p = float(tr_eval["acc_match"]), float(tr_eval["acc_play"])
+        te_m, te_p = float(te_eval["acc_match"]), float(te_eval["acc_play"])
+        te_o = float(te_eval["acc_overall"])
+        print(
+            f"  split: train={n_tr} (match={tr_nm}, play={tr_np}) | test={n_te} (match={te_nm}, play={te_np}) | "
+            f"resume eval train match={tr_m} play={tr_p} | test match={te_m} play={te_p} overall={te_o:.4f}",
+            flush=True,
+        )
+    else:
+        model, hist_bc, n_tr, n_te, tr_nm, tr_np, te_nm, te_np, test_samples = train_static_bc(
+            samples=samples,
+            epochs=args.bc_epochs,
+            batch=args.bc_batch,
+            lr=args.bc_lr,
+            device=device,
+            seed=args.seed,
+            match_flat_dim=mfd,
+            play_loss_weight=args.play_loss_weight,
+            hidden_dim=32,
+            test_ratio=args.bc_test_ratio,
+            env=base_env,
+            pass_row=pass_row,
+            public_slots=MAX_PUBLIC_SLOTS,
+        )
     bc_sizes = {
         "teacher_episodes": args.bc_episodes,
         "total_timesteps": len(samples),
@@ -664,20 +720,22 @@ def main():
         "bc_epochs": args.bc_epochs,
         "bc_batch": args.bc_batch,
     }
-    last = -1
-    print(
-        f"  split: train={n_tr} (match={tr_nm}, play={tr_np}) | test={n_te} (match={te_nm}, play={te_np}) | "
-        f"last train match={hist_bc['train_acc_match'][last]} play={hist_bc['train_acc_play'][last]} | "
-        f"test match={hist_bc['test_acc_match'][last]} play={hist_bc['test_acc_play'][last]} "
-        f"overall={hist_bc['test_acc_overall'][last]:.4f}",
-        flush=True,
-    )
-
-    tr_p = hist_bc["train_acc_play"][last]
-    te_p = hist_bc["test_acc_play"][last]
-    tr_m = hist_bc["train_acc_match"][last]
-    te_m = hist_bc["test_acc_match"][last]
-    te_o = hist_bc["test_acc_overall"][last]
+    if not resume_path:
+        last = -1
+        print(
+            f"  split: train={n_tr} (match={tr_nm}, play={tr_np}) | test={n_te} (match={te_nm}, play={te_np}) | "
+            f"last train match={hist_bc['train_acc_match'][last]} play={hist_bc['train_acc_play'][last]} | "
+            f"test match={hist_bc['test_acc_match'][last]} play={hist_bc['test_acc_play'][last]} "
+            f"overall={hist_bc['test_acc_overall'][last]:.4f}",
+            flush=True,
+        )
+        tr_p = float(hist_bc["train_acc_play"][last])
+        te_p = float(hist_bc["test_acc_play"][last])
+        tr_m = float(hist_bc["train_acc_match"][last])
+        te_m = float(hist_bc["test_acc_match"][last])
+        te_o = float(hist_bc["test_acc_overall"][last])
+        train_samples, _ = split_samples_stratified(samples, test_ratio=args.bc_test_ratio, seed=args.seed)
+    # resume_path branch already set tr_*, te_*, train_samples, test_samples, and printed split.
 
     if tr_np < args.min_train_play_labels:
         raise SystemExit(
@@ -701,8 +759,6 @@ def main():
     _check_acc("Train play accuracy", tr_p, args.min_train_play_acc)
     _check_acc("Test play accuracy", te_p, args.min_test_play_acc)
     _check_acc("Test overall accuracy", te_o, args.min_test_overall_acc)
-
-    train_samples, _ = split_samples_stratified(samples, test_ratio=args.bc_test_ratio, seed=args.seed)
 
     if args.critic_static_in:
         mr, pr, bundle_meta = load_critic_bundle(args.critic_static_in)
@@ -762,12 +818,27 @@ def main():
             play_loss_weight=args.play_loss_weight,
             seed=args.seed,
         )
-        log_every = max(1, args.joint_epochs // 16)
+        if (
+            ckpt_prev is not None
+            and ckpt_prev.get("hist_critic", {}).get("mode") == "joint_static"
+            and isinstance(ckpt_prev["hist_critic"].get("joint"), dict)
+        ):
+            pj = ckpt_prev["hist_critic"]["joint"]
+            for k in jhist:
+                if k in pj and isinstance(pj[k], list):
+                    jhist[k] = list(pj[k]) + list(jhist[k])
+            print(
+                f"  appended joint history: +{args.joint_epochs} epochs "
+                f"(total joint epochs in summary={len(jhist['loss_total'])})",
+                flush=True,
+            )
+        n_joint_ep = len(jhist["loss_total"])
+        log_every = max(1, n_joint_ep // 16)
         for i, (lb, lm, lp_, lt) in enumerate(
             zip(jhist["loss_bc"], jhist["loss_m"], jhist["loss_p"], jhist["loss_total"], strict=True),
             start=1,
         ):
-            if i == 1 or i == args.joint_epochs or i % log_every == 0:
+            if i == 1 or i == n_joint_ep or i % log_every == 0:
                 print(
                     f"  joint ep {i:3d}: L_bc={lb:.5f} L_match={lm:.5f} (RMSE~{math.sqrt(max(0.0, lm)):.3f}) | "
                     f"L_play={lp_:.5f} (RMSE~{math.sqrt(max(0.0, lp_)):.3f}) | L_total={lt:.5f}",
