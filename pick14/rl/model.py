@@ -5,6 +5,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from pick14.rl.encoding import MAX_PLAY_HAND, NUM_GLOBAL_PLAY_CONTEXT_KEYS
+from pick14.rl.rlmd_model import RLmdPPOAgent
 
 
 class PointerPolicyNet(nn.Module):

@@ -69,21 +69,40 @@ To prevent gradient thrashing between the Agent's exploratory policy and the Opp
 
 The environment uses a Turn-Based Net-Gap Macro-Step. The target metric is strictly the point gap between the Agent and the Opponent.
 
-### 4.1 Temporal Reward Splitting
-Direct scores are recorded after each match action. The true reward for PPO is calculated as the differential:
-* **Match Reward:** $R_{match} = \text{Agent\_Score} - \text{Opponent\_Score}$
-* **Play Reward:** $R_{play} = \text{Agent\_Score} - \text{Opponent\_Score}$ (Ensuring the gradient ascent naturally maximizes the Agent's relative standing).
+### 4.1 Atomic Reward Definitions
+To calculate accurate discounted future returns without double-counting, the scoring events are decoupled into strictly sequential, alternating atomic rewards. 
 
-### 4.2 Match Action Training
-* **Target:** Maximize $R_{match}$.
-* **Advantage:** Calculated using the baseline prediction from the `Critic-Agent` evaluated at $S_{pre\_match}$.
-* $$A_{match} = R_{match} - V_{agent}(S_{pre\_match})$$
+Let $A_t$ be the points the Agent scores on turn $t$.
+Let $O_t$ be the points the Opponent scores on their subsequent turn $t$.
 
-### 4.3 Play Action Training (Expected Value Critic)
-To stabilize learning and map the immediate discard to the opponent's subsequent turn, the Play action utilizes the Bellman Expectation Equation.
-* **Target:** Maximize $R_{play}$.
-* **Advantage Calculation:** Given a pre-play state, the Play Head generates a probability distribution $\pi(a)$ for all valid play actions.
-* The `Critic-Opponent` evaluates the deterministic resulting state $S_{post\_play}$ for *each* valid action $i$.
-* The effective baseline prediction is the weighted sum of these outcomes:
-    $$V_{target} = \sum_{i=1}^{K} \pi(a_i) \cdot V_{opponent}(S_{post\_play\_i})$$
-* This EV scalar is used for error backpropagation on the `Critic-Opponent` itself and to calculate the Advantage for the Actor's Play Head.
+* **Atomic Match Reward:** $r_{match}^{(t)} = A_t$
+    *(The immediate offensive points gained by the Agent's match).*
+* **Atomic Play Reward:** $r_{play}^{(t)} = -O_t$
+    *(The immediate defensive penalty incurred by the opponent's response to the discard).*
+
+### 4.2 Discounted Cumulative Returns ($G_t$)
+The agent evaluates the quality of an action not just by its atomic reward, but by the infinite sum of discounted future rewards, governed by the discount factor $\gamma \in [0, 1)$.
+
+**1. Match Action Return ($G_{match}$):**
+The sequence from a Match action looks forward through the Play action and into the next turn.
+$$G_{match}^{(t)} = r_{match}^{(t)} + \gamma r_{play}^{(t)} + \gamma^2 r_{match}^{(t+1)} + \gamma^3 r_{play}^{(t+1)} + \dots$$
+*(Substituting the game metrics: $A_t - \gamma O_t + \gamma^2 A_{t+1} - \gamma^3 O_{t+1} \dots$)*
+
+**2. Play Action Return ($G_{play}$):**
+The sequence from a Play action looks forward into the opponent's immediate response and the Agent's subsequent offensive turn.
+$$G_{play}^{(t)} = r_{play}^{(t)} + \gamma r_{match}^{(t+1)} + \gamma^2 r_{play}^{(t+1)} + \dots$$
+*(Substituting the game metrics: $-O_t + \gamma A_{t+1} - \gamma^2 O_{t+1} \dots$)*
+
+### 4.3 Dual Critics and Advantage Calculation
+Because $G_{match}$ and $G_{play}$ evaluate staggered starting points of the exact same infinite sequence, the two Critic networks are optimized to predict these specific cumulative returns.
+
+* **Critic-Agent:** Optimized to predict $G_{match}^{(t)}$ from the $S_{pre\_match}$ state.
+* **Critic-Opponent:** Optimized to predict $G_{play}^{(t)}$ from the $S_{post\_play}$ state.
+
+**The Advantage Updates:**
+During PPO backpropagation, the Advantages used to update the Actor heads are calculated using the Temporal Difference (TD) error or Generalized Advantage Estimation (GAE) based on these predictions:
+
+* **Match Advantage:** $A_{match} = G_{match}^{(t)} - V_{agent}(S_{pre\_match})$
+* **Play Advantage:** $A_{play} = G_{play}^{(t)} - V_{opponent}(S_{post\_play})$
+
+*(Note on the Play Critic: The Expected Value (EV) weighting across all possible play actions, $\sum \pi(a_i) V_{opponent}(S_{post\_play\_i})$, is maintained as the baseline for calculating the Play Advantage).*

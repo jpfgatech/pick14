@@ -12,9 +12,10 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
 from pick14.rl.env import Pick14GymEnv
-from pick14.rl.model import DualHeadPolicyNet
+from pick14.rl.rlmd_model import RLmdPPOAgent
+from pick14.rl.rlmd_sequences import RLMD_POOL_SLOTS
 
-MAX_KEYS = 17
+MAX_KEYS = RLMD_POOL_SLOTS
 
 
 @dataclass(slots=True)
@@ -183,7 +184,7 @@ def _accum_epoch(model, dl, opt, device: torch.device, match_flat_dim: int, trai
         obs = to_torch(obs_np, device)
         actions = torch.as_tensor(actions_np, device=device)
         with torch.set_grad_enabled(train):
-            match_logits, play_logits, _ = model(obs)
+            match_logits, play_logits, _, _ = model(obs)
             loss, st = dual_bc_loss(
                 match_logits,
                 play_logits,
@@ -263,9 +264,8 @@ def train_static_bc(
     train_dl = DataLoader(train_ds, batch_size=batch, shuffle=True, collate_fn=collate)
     test_dl = DataLoader(test_ds, batch_size=batch, shuffle=False, collate_fn=collate)
 
-    model = DualHeadPolicyNet(
-        max_hand_combos=7, max_match_keys=MAX_KEYS, hidden_dim=hidden_dim
-    ).to(device)
+    _ = hidden_dim  # kept for CLI backward compatibility (rl.md uses fixed D=32)
+    model = RLmdPPOAgent(dropout=0.0).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=lr)
 
     hist: dict[str, list[float]] = {
@@ -360,12 +360,12 @@ def _find_multi_match_case(env: Pick14GymEnv):
         enc = env._last_encoded
         if float(obs["phase"][0]) >= 0.5:
             continue
-        if int(obs["hand_valid"].sum()) < 7:
+        if int(obs["seq_agent_mask"][:7].sum()) < 7:
             continue
         public_count = int(obs["public_valid"].sum())
         if public_count <= 0:
             continue
-        match_valid = int(obs["mask"][:, :public_count].sum())
+        match_valid = int(obs["mask_match"][:, :public_count].sum())
         if match_valid >= 2:
             return seed, obs, env.state, enc, match_valid
     return None
@@ -387,12 +387,12 @@ def print_one_case(env: Pick14GymEnv, out_dir: Path):
         "public_cards": pub_txt,
         "hand_vecs_9d": obs["hand_vecs"].tolist(),
         "public_vecs_9d": obs["public_vecs"].tolist(),
-        "mask_7x17": obs["mask"].astype(int).tolist(),
-        "play_hand_vecs_9d": obs["play_hand_vecs"].tolist(),
+        "mask_7xK": obs["mask_match"].astype(int).tolist(),
         "play_hand_valid": obs["play_hand_valid"].astype(int).tolist(),
-        "play_key_mask": obs["play_key_mask"].astype(int).tolist(),
+        "seq_agent_feats_shape": list(obs["seq_agent_feats"].shape),
+        "seq_critic_feats_shape": list(obs["seq_critic_feats"].shape),
         "public_count": enc.public_count,
-        "notes": "mask[row=hand_combo_i][col=public_j or pass_col=public_count], 1=valid",
+        "notes": "mask_match[row=hand_combo_i][col=public_j or pass_col=public_count], 1=valid; rl.md sequences in seq_*",
     }
     (out_dir / "one_case_encoding.json").write_text(json.dumps(case, indent=2))
     print("=== One case (human-readable, multiple matches) ===")
@@ -412,7 +412,7 @@ def print_one_case(env: Pick14GymEnv, out_dir: Path):
     for i in range(7):
         if int(obs["hand_valid"][i]) == 0:
             break
-        row = obs["mask"][i][: enc.public_count + 1].astype(int).tolist()
+        row = obs["mask_match"][i][: enc.public_count + 1].astype(int).tolist()
         print(f"  mask[{i}] = {row}")
 
 
@@ -452,7 +452,7 @@ def main():
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    env = Pick14GymEnv(num_players=3, n_hand=3, seed=args.seed)
+    env = Pick14GymEnv(num_players=2, n_hand=3, seed=args.seed)
     mfd = env.match_flat_dim
 
     size_curve: list[tuple[int, float]] = []
