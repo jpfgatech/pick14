@@ -1,6 +1,8 @@
 *.swp
 .*.swp
 
+.cursor/
+
 __pycache__/
 *.py[cod]
 .Python
