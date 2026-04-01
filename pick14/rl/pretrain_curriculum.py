@@ -222,6 +222,12 @@ def collate_critic(batch):
     return obs, tgt
 
 
+def critic_match_obs_has_legal_action(obs: dict[str, np.ndarray]) -> bool:
+    """True if ``mask_match`` has at least one legal cell (combo or pass row)."""
+    mm = np.asarray(obs["mask_match"])
+    return bool(mm.reshape(-1).astype(bool).any())
+
+
 def _play_ev_loss(
     model: RLmdPPOAgent,
     device: torch.device,
