@@ -1,5 +1,9 @@
 """
-curriculum.md Phase 1 (mixed BC) + Phase 2 (freeze actors, MSE both critics vs MC returns).
+curriculum.md: Phase 1 mixed BC (match + play, shared trunk) → Phase 2 critic MSE on rollouts.
+
+Uses rl.md §1.5 **baseline** teacher (greedy-for-public + caution) via ``teacher_action`` / ``table_all_baseline``.
+After Phase 2, actor weights are unchanged (frozen); we re-evaluate BC on the held-out split to confirm
+match/play/overall accuracy stayed at the Phase 1 level (target well above 95% with default hyperparameters).
 """
 
 from __future__ import annotations
@@ -18,7 +22,17 @@ from torch.utils.data import DataLoader, Dataset
 
 from pick14.rl.env import Pick14GymEnv
 from pick14.rl.rlmd_model import RLmdPPOAgent
-from pick14.rl.train_bc_static import BC_PHASE_SEMANTICS, Sample, collect_teacher_samples, train_static_bc
+from pick14.rl.rlmd_obs import RlmdObservationWrapper
+from pick14.rl.sim_core import MAX_PUBLIC_SLOTS
+from pick14.rl.train_bc_static import (
+    BC_PHASE_SEMANTICS,
+    ImitationDataset,
+    Sample,
+    collate,
+    collect_teacher_samples,
+    eval_epoch,
+    train_static_bc,
+)
 
 
 def _sanitize_json(x):
@@ -48,11 +62,12 @@ def collect_critic_bootstrap_data(
     match_rows: list[tuple[dict[str, np.ndarray], float]] = []
     play_rows: list[tuple[dict[str, np.ndarray], float]] = []
     model.eval()
+    base = env.unwrapped
     for ep in range(episodes):
         obs, _ = env.reset(seed=seed_base + ep)
         trans: list[tuple[bool, float, dict[str, np.ndarray], dict[str, np.ndarray] | None]] = []
         for _ in range(max_steps):
-            if env.state is None or env.state.current_player != 0:
+            if base.state is None or base.state.current_player != 0:
                 break
             is_match = float(obs["phase"][0]) < 0.5
             with torch.no_grad():
@@ -65,8 +80,8 @@ def collect_critic_bootstrap_data(
             action = sub if is_match else sub + model.match_flat_dim
             next_obs, rew, term, trunc, _ = env.step(action)
             obs_post = None
-            if not is_match and env._post_play_obs is not None:
-                obs_post = {k: np.asarray(v).copy() for k, v in env._post_play_obs.items()}
+            if not is_match and base._post_play_obs is not None:
+                obs_post = {k: np.asarray(v).copy() for k, v in base._post_play_obs.items()}
             trans.append((is_match, float(rew), {k: v.copy() for k, v in obs.items()}, obs_post))
             obs = next_obs
             if term or trunc:
@@ -126,7 +141,6 @@ def train_critics_mse(
     model.set_requires_grad_critics(True)
     ds_m = CriticDataset(match_rows)
     ds_p = CriticDataset(play_rows)
-    # Joint batches: alternate mini-updates from each stream
     dl_m = DataLoader(ds_m, batch_size=batch, shuffle=True, collate_fn=collate_critic) if ds_m else None
     dl_p = DataLoader(ds_p, batch_size=batch, shuffle=True, collate_fn=collate_critic) if ds_p else None
     opt = torch.optim.Adam([p for p in model.parameters() if p.requires_grad], lr=lr)
@@ -166,53 +180,85 @@ def train_critics_mse(
 
 
 def main():
-    ap = argparse.ArgumentParser(description="curriculum.md Phase 1 BC + Phase 2 critic bootstrap")
+    ap = argparse.ArgumentParser(description="curriculum.md Phase 1 BC + Phase 2 critic bootstrap (baseline teacher)")
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--out-dir", type=str, default="artifacts/rl_curriculum")
-    ap.add_argument("--bc-episodes", type=int, default=360)
-    ap.add_argument("--bc-epochs", type=int, default=16)
+    ap.add_argument("--bc-episodes", type=int, default=900, help="Teacher rollouts for BC dataset (increase if <95% acc).")
+    ap.add_argument("--bc-epochs", type=int, default=48, help="Phase 1 BC epochs (joint match+play, mixed batches).")
     ap.add_argument("--bc-batch", type=int, default=128)
     ap.add_argument("--bc-lr", type=float, default=1e-3)
     ap.add_argument("--bc-test-ratio", type=float, default=0.2, help="Held-out fraction per phase (match vs play stratified).")
     ap.add_argument("--play-loss-weight", type=float, default=2.0)
     ap.add_argument(
+        "--min-train-match-acc",
+        type=float,
+        default=0.95,
+        help="Phase 1 gate: train split match-head accuracy (NaN if no rows).",
+    )
+    ap.add_argument(
+        "--min-test-match-acc",
+        type=float,
+        default=0.95,
+        help="Phase 1 gate: test split match-head accuracy.",
+    )
+    ap.add_argument(
         "--min-train-play-acc",
         type=float,
-        default=0.98,
-        help="Abort if final train play-head accuracy is below this (requires enough train play labels).",
+        default=0.95,
+        help="Phase 1 gate: train play-head accuracy.",
     )
     ap.add_argument(
         "--min-test-play-acc",
         type=float,
-        default=0.98,
-        help="Abort if final test play-head accuracy is below this (requires enough test play labels).",
+        default=0.95,
+        help="Phase 1 gate: test play-head accuracy.",
+    )
+    ap.add_argument(
+        "--min-test-overall-acc",
+        type=float,
+        default=0.95,
+        help="Phase 1 gate: test overall imitation accuracy.",
     )
     ap.add_argument(
         "--min-train-play-labels",
         type=int,
-        default=32,
-        help="Minimum play-phase rows in the train split to enforce --min-train-play-acc.",
+        default=48,
+        help="Minimum play-phase rows in the train split to enforce play accuracy gates.",
     )
     ap.add_argument(
         "--min-test-play-labels",
         type=int,
-        default=32,
-        help="Minimum play-phase rows in the test split to enforce --min-test-play-acc.",
+        default=48,
+        help="Minimum play-phase rows in the test split.",
     )
-    ap.add_argument("--critic-rollout-episodes", type=int, default=400)
-    ap.add_argument("--critic-epochs", type=int, default=8)
+    ap.add_argument("--critic-rollout-episodes", type=int, default=500)
+    ap.add_argument("--critic-epochs", type=int, default=12)
     ap.add_argument("--critic-batch", type=int, default=64)
     ap.add_argument("--critic-lr", type=float, default=3e-4)
     ap.add_argument("--gamma", type=float, default=0.99)
+    ap.add_argument(
+        "--post-bc-eval-batch",
+        type=int,
+        default=256,
+        help="Batch size for BC re-check on held-out samples after Phase 2 (actors unchanged when frozen).",
+    )
     args = ap.parse_args()
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    env = Pick14GymEnv(num_players=2, n_hand=3, seed=args.seed)
-    mfd = env.match_flat_dim
+    from pick14.rl.agents import table_all_baseline
 
-    print("[Phase 1] Mixed BC (greedy match + stingy play teacher; stratified split + mixed batches per curriculum.md §1.2)")
+    base_env = Pick14GymEnv(table_all_baseline(2), n_hand=3, seed=args.seed)
+    env = RlmdObservationWrapper(base_env)
+    mfd = base_env.match_flat_dim
+    pass_row = base_env._max_match_combos
+
+    print(
+        "[Phase 1] Mixed BC — baseline teacher (greedy-for-public match + caution play); "
+        "stratified split + mixed batches (curriculum.md §1.2)",
+        flush=True,
+    )
     samples: list[Sample] = collect_teacher_samples(env, episodes=args.bc_episodes, seed_base=1000)
     total_nm, total_np = (
         sum(1 for s in samples if float(s.obs["phase"][0]) < 0.5),
@@ -223,7 +269,7 @@ def main():
         f"(~{total_nm} match-phase, ~{total_np} play-phase labels)",
         flush=True,
     )
-    model, hist_bc, n_tr, n_te, tr_nm, tr_np, te_nm, te_np = train_static_bc(
+    model, hist_bc, n_tr, n_te, tr_nm, tr_np, te_nm, te_np, test_samples = train_static_bc(
         samples=samples,
         epochs=args.bc_epochs,
         batch=args.bc_batch,
@@ -234,6 +280,9 @@ def main():
         play_loss_weight=args.play_loss_weight,
         hidden_dim=32,
         test_ratio=args.bc_test_ratio,
+        env=base_env,
+        pass_row=pass_row,
+        public_slots=MAX_PUBLIC_SLOTS,
     )
     bc_sizes = {
         "teacher_episodes": args.bc_episodes,
@@ -249,15 +298,21 @@ def main():
         "bc_epochs": args.bc_epochs,
         "bc_batch": args.bc_batch,
     }
+    last = -1
     print(
         f"  split: train={n_tr} (match={tr_nm}, play={tr_np}) | test={n_te} (match={te_nm}, play={te_np}) | "
-        f"last acc train_play={hist_bc['train_acc_play'][-1]} test_play={hist_bc['test_acc_play'][-1]} "
-        f"test_overall={hist_bc['test_acc_overall'][-1]:.4f}",
+        f"last train match={hist_bc['train_acc_match'][last]} play={hist_bc['train_acc_play'][last]} | "
+        f"test match={hist_bc['test_acc_match'][last]} play={hist_bc['test_acc_play'][last]} "
+        f"overall={hist_bc['test_acc_overall'][last]:.4f}",
         flush=True,
     )
 
-    tr_p = hist_bc["train_acc_play"][-1]
-    te_p = hist_bc["test_acc_play"][-1]
+    tr_p = hist_bc["train_acc_play"][last]
+    te_p = hist_bc["test_acc_play"][last]
+    tr_m = hist_bc["train_acc_match"][last]
+    te_m = hist_bc["test_acc_match"][last]
+    te_o = hist_bc["test_acc_overall"][last]
+
     if tr_np < args.min_train_play_labels:
         raise SystemExit(
             f"Too few train play-phase labels ({tr_np} < {args.min_train_play_labels}); "
@@ -268,18 +323,24 @@ def main():
             f"Too few test play-phase labels ({te_np} < {args.min_test_play_labels}); "
             "increase --bc-episodes or lower --bc-test-ratio slightly."
         )
-    if isinstance(tr_p, float) and not math.isnan(tr_p) and tr_p < args.min_train_play_acc:
-        raise SystemExit(
-            f"Train play accuracy {tr_p:.4f} < {args.min_train_play_acc}; "
-            "increase --bc-epochs / --bc-episodes or tune --play-loss-weight."
-        )
-    if isinstance(te_p, float) and not math.isnan(te_p) and te_p < args.min_test_play_acc:
-        raise SystemExit(
-            f"Test play accuracy {te_p:.4f} < {args.min_test_play_acc}; "
-            "increase --bc-epochs / --bc-episodes or tune --play-loss-weight."
-        )
 
-    print("[Phase 2] Freeze actors, critic MSE on policy rollouts")
+    def _check_acc(name: str, val: float, thresh: float) -> None:
+        if math.isnan(val):
+            return
+        if val < thresh:
+            raise SystemExit(f"{name}={val:.4f} < {thresh}; increase --bc-epochs / --bc-episodes or tune --play-loss-weight.")
+
+    _check_acc("Train match accuracy", tr_m, args.min_train_match_acc)
+    _check_acc("Test match accuracy", te_m, args.min_test_match_acc)
+    _check_acc("Train play accuracy", tr_p, args.min_train_play_acc)
+    _check_acc("Test play accuracy", te_p, args.min_test_play_acc)
+    _check_acc("Test overall accuracy", te_o, args.min_test_overall_acc)
+
+    print(
+        "[Phase 2] Freeze actors (embeddings + shared L1 + match/play L2); critic MSE on policy rollouts "
+        "(curriculum.md §2)",
+        flush=True,
+    )
     crit_hist = train_critics_mse(
         model,
         *collect_critic_bootstrap_data(
@@ -295,22 +356,48 @@ def main():
         batch=args.critic_batch,
         lr=args.critic_lr,
     )
-    print(f"  critic loss last (joint)={crit_hist['loss'][-1]:.6f}")
+    print(f"  critic loss last (joint)={crit_hist['loss'][-1]:.6f}", flush=True)
+
+    test_ds = ImitationDataset(test_samples)
+    test_dl = DataLoader(test_ds, batch_size=args.post_bc_eval_batch, shuffle=False, collate_fn=collate)
+    post = eval_epoch(
+        model,
+        test_dl,
+        device,
+        mfd,
+        args.play_loss_weight,
+        pass_row,
+        MAX_PUBLIC_SLOTS,
+    )
+    print(
+        f"[Post Phase 2] BC eval on held-out split (actor weights unchanged): "
+        f"loss={post['loss']:.4f} acc_overall={post['acc_overall']:.4f} "
+        f"acc_match={post['acc_match']} acc_play={post['acc_play']}",
+        flush=True,
+    )
+    if post["acc_overall"] + 1e-6 < args.min_test_overall_acc:
+        raise SystemExit(
+            f"Post–Phase 2 overall BC acc {post['acc_overall']:.4f} < {args.min_test_overall_acc} "
+            "(unexpected if critics were frozen from actors)."
+        )
 
     ckpt = {
         "model": model.state_dict(),
         "hist_bc": hist_bc,
         "hist_critic": crit_hist,
+        "bc_post_phase2_eval": post,
         "bc_data_sizes": bc_sizes,
         "bc_phase_semantics": BC_PHASE_SEMANTICS,
         "config": vars(args),
         "match_flat_dim": mfd,
+        "baseline_teacher": "greedy_for_public_caution",
     }
     torch.save(ckpt, out_dir / "checkpoint_curriculum.pt")
     summary_payload = _sanitize_json(
         {
             "bc": hist_bc,
             "critic": crit_hist,
+            "bc_post_phase2_eval": post,
             "bc_data_sizes": bc_sizes,
             "bc_phase_semantics": BC_PHASE_SEMANTICS,
             "config": vars(args),

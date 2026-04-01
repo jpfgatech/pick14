@@ -13,20 +13,18 @@ from torch.utils.data import BatchSampler, DataLoader, Dataset
 
 from pick14.rl.env import Pick14GymEnv
 from pick14.rl.rlmd_model import RLmdPPOAgent
-from pick14.rl.rlmd_sequences import RLMD_POOL_SLOTS
-
-MAX_KEYS = RLMD_POOL_SLOTS
+from pick14.rl.rlmd_obs import RlmdObservationWrapper
+from pick14.rl.sim_core import MAX_PUBLIC_SLOTS
 
 # Explanatory text for curriculum logs / summary.json (BC label counts vs informal “one play per turn”).
 BC_PHASE_SEMANTICS: dict[str, str] = {
     "match_phase_obs": (
-        "obs['phase'][0] < 0.5 iff GameState.must_play_only is False. "
-        "Gym actions use the match head (including pass as PlayMove via the pass column). "
-        "This covers the vast majority of seat-0 decision timesteps."
+        "obs['phase'][0] < 0.5 iff sim_core.TurnPhase.MATCH — match head + pass row (flat mask). "
+        "Gym actions use the match head for subset×public cells plus the dedicated pass row."
     ),
     "play_phase_obs": (
-        "obs['phase'][0] >= 0.5 iff must_play_only is True: forced discard after a scoring match "
-        "while the deck was not exhausted (engine._apply_match)."
+        "obs['phase'][0] >= 0.5 iff TurnPhase.PLAY — discard one hand card (after Draw1 or pass-match path). "
+        "Includes deck-exhausted post-match paths where the hand still holds n_hand+1 until discard."
     ),
     "why_play_labels_are_much_rarer_than_match": (
         "A play-phase row exists only for that forced-discard decision. Passing without scoring, "
@@ -65,19 +63,25 @@ def to_torch(obs_np: dict[str, np.ndarray], device: torch.device) -> dict[str, t
     return {k: torch.as_tensor(v, device=device) for k, v in obs_np.items()}
 
 
-def pass_col_from_obs(obs_t: dict[str, torch.Tensor]) -> torch.Tensor:
-    return obs_t["public_valid"].sum(dim=1).long()
-
-
-def grouped_bc_loss_and_acc(logits: torch.Tensor, actions: torch.Tensor, obs_t: dict[str, torch.Tensor], max_keys: int):
+def grouped_bc_loss_and_acc(
+    logits: torch.Tensor,
+    actions: torch.Tensor,
+    mask_match: torch.Tensor,
+    *,
+    pass_row: int,
+    public_slots: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Pass-match actions share one logical label (teacher row ``pass_row``); sum logits over all legal pass cells.
+    """
     bsz = logits.shape[0]
     device = logits.device
-    pass_col = pass_col_from_obs(obs_t)
-    k_idx = actions % max_keys
-    is_pass_teacher = k_idx.eq(pass_col)
+    match_flat_dim = logits.shape[1]
+    rows = actions // public_slots
+    is_pass_teacher = rows.eq(pass_row)
 
     logp = F.log_softmax(logits, dim=1)
-    losses = []
+    losses: list[torch.Tensor] = []
     pred = logits.argmax(dim=1)
 
     if (~is_pass_teacher).any():
@@ -86,20 +90,25 @@ def grouped_bc_loss_and_acc(logits: torch.Tensor, actions: torch.Tensor, obs_t: 
 
     if is_pass_teacher.any():
         idx = torch.nonzero(is_pass_teacher, as_tuple=False).squeeze(1)
-        pass_col_i = pass_col[idx]
-        combo_ids = torch.arange(7, device=device).view(1, 7).expand(idx.shape[0], 7)
-        pass_flat = combo_ids * max_keys + pass_col_i.view(-1, 1)
-        selected = logp[idx].gather(1, pass_flat)
-        group_logp = torch.logsumexp(selected, dim=1)
+        mask_flat = mask_match.reshape(bsz, -1).bool()
+        flat_idx = torch.arange(match_flat_dim, device=device)
+        pass_cell = (flat_idx // public_slots).eq(pass_row)
+        stack: list[torch.Tensor] = []
+        for b in idx.tolist():
+            legal = pass_cell & mask_flat[b]
+            if legal.any():
+                stack.append(torch.logsumexp(logp[b, legal], dim=0))
+            else:
+                stack.append(torch.tensor(0.0, device=device))
+        group_logp = torch.stack(stack)
         losses.append((-group_logp).mean())
 
     loss = sum(losses) if losses else torch.tensor(0.0, device=device)
 
-    pred_k = pred % max_keys
-    pred_is_pass = pred_k.eq(pass_col)
+    pred_rows = pred // public_slots
     correct = torch.zeros((bsz,), dtype=torch.bool, device=device)
     correct = torch.where(~is_pass_teacher, pred.eq(actions), correct)
-    correct = torch.where(is_pass_teacher, pred_is_pass, correct)
+    correct = torch.where(is_pass_teacher, pred_rows.eq(pass_row), correct)
     acc = correct.float().mean()
     return loss, acc
 
@@ -110,7 +119,8 @@ def dual_bc_loss(
     actions: torch.Tensor,
     obs_t: dict[str, torch.Tensor],
     match_flat_dim: int,
-    max_keys: int,
+    pass_row: int,
+    public_slots: int,
     play_loss_weight: float,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """
@@ -136,7 +146,11 @@ def dual_bc_loss(
     if m_idx.numel() > 0:
         obs_m = {k: v[m_idx] for k, v in obs_t.items()}
         lm, am = grouped_bc_loss_and_acc(
-            match_logits[m_idx], actions[m_idx], obs_m, max_keys=max_keys
+            match_logits[m_idx],
+            actions[m_idx],
+            obs_m["mask_match"],
+            pass_row=pass_row,
+            public_slots=public_slots,
         )
         loss_parts.append(lm)
         weights.append(float(m_idx.numel()))
@@ -177,12 +191,12 @@ def dual_bc_loss(
     return loss, stats
 
 
-def collect_teacher_samples(env: Pick14GymEnv, episodes: int, max_steps: int = 256, seed_base: int = 0) -> list[Sample]:
+def collect_teacher_samples(env: Pick14GymEnv | RlmdObservationWrapper, episodes: int, max_steps: int = 256, seed_base: int = 0) -> list[Sample]:
     out: list[Sample] = []
     for ep in range(episodes):
         obs, _ = env.reset(seed=seed_base + ep)
         for _ in range(max_steps):
-            action = env.teacher_action()
+            action = int(env.unwrapped.teacher_action())
             out.append(Sample(obs={k: v.copy() for k, v in obs.items()}, action=int(action)))
             obs, _, term, trunc, _ = env.step(action)
             if term or trunc:
@@ -190,7 +204,17 @@ def collect_teacher_samples(env: Pick14GymEnv, episodes: int, max_steps: int = 2
     return out
 
 
-def _accum_epoch(model, dl, opt, device: torch.device, match_flat_dim: int, train: bool, play_loss_weight: float):
+def _accum_epoch(
+    model,
+    dl,
+    opt,
+    device: torch.device,
+    match_flat_dim: int,
+    train: bool,
+    play_loss_weight: float,
+    pass_row: int,
+    public_slots: int,
+):
     if train:
         model.train()
     else:
@@ -213,7 +237,8 @@ def _accum_epoch(model, dl, opt, device: torch.device, match_flat_dim: int, trai
                 actions,
                 obs,
                 match_flat_dim=match_flat_dim,
-                max_keys=MAX_KEYS,
+                pass_row=pass_row,
+                public_slots=public_slots,
                 play_loss_weight=play_loss_weight,
             )
         if train:
@@ -243,13 +268,50 @@ def _accum_epoch(model, dl, opt, device: torch.device, match_flat_dim: int, trai
     return out
 
 
-def train_epoch(model, dl, opt, device: torch.device, match_flat_dim: int, play_loss_weight: float):
-    return _accum_epoch(model, dl, opt, device, match_flat_dim, train=True, play_loss_weight=play_loss_weight)
+def train_epoch(
+    model,
+    dl,
+    opt,
+    device: torch.device,
+    match_flat_dim: int,
+    play_loss_weight: float,
+    pass_row: int,
+    public_slots: int,
+):
+    return _accum_epoch(
+        model,
+        dl,
+        opt,
+        device,
+        match_flat_dim,
+        train=True,
+        play_loss_weight=play_loss_weight,
+        pass_row=pass_row,
+        public_slots=public_slots,
+    )
 
 
 @torch.no_grad()
-def eval_epoch(model, dl, device: torch.device, match_flat_dim: int, play_loss_weight: float):
-    return _accum_epoch(model, dl, None, device, match_flat_dim, train=False, play_loss_weight=play_loss_weight)
+def eval_epoch(
+    model,
+    dl,
+    device: torch.device,
+    match_flat_dim: int,
+    play_loss_weight: float,
+    pass_row: int,
+    public_slots: int,
+):
+    return _accum_epoch(
+        model,
+        dl,
+        None,
+        device,
+        match_flat_dim,
+        train=False,
+        play_loss_weight=play_loss_weight,
+        pass_row=pass_row,
+        public_slots=public_slots,
+    )
 
 
 def phase_counts(samples: list[Sample]) -> tuple[int, int]:
@@ -392,11 +454,14 @@ def train_static_bc(
     seed: int,
     match_flat_dim: int,
     play_loss_weight: float,
+    pass_row: int,
+    public_slots: int = MAX_PUBLIC_SLOTS,
     hidden_dim: int = 32,
     *,
     stratified_split: bool = True,
     mixed_train_batches: bool = True,
     test_ratio: float = 0.2,
+    env: Pick14GymEnv | None = None,
 ):
     if stratified_split:
         train_samples, test_samples = split_samples_stratified(samples, test_ratio=test_ratio, seed=seed)
@@ -412,7 +477,9 @@ def train_static_bc(
     test_dl = DataLoader(test_ds, batch_size=batch, shuffle=False, collate_fn=collate)
 
     _ = hidden_dim  # kept for CLI backward compatibility (rl.md uses fixed D=32)
-    model = RLmdPPOAgent(dropout=0.0).to(device)
+    if env is None:
+        raise ValueError("train_static_bc requires env=Pick14GymEnv for RLmdPPOAgent sizing")
+    model = RLmdPPOAgent.from_env(env, dropout=0.0).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=lr)
 
     hist: dict[str, list[float]] = {
@@ -426,8 +493,10 @@ def train_static_bc(
         "test_acc_play": [],
     }
     for _ in range(epochs):
-        tr = train_epoch(model, train_dl, opt, device, match_flat_dim, play_loss_weight)
-        te = eval_epoch(model, test_dl, device, match_flat_dim, play_loss_weight)
+        tr = train_epoch(
+            model, train_dl, opt, device, match_flat_dim, play_loss_weight, pass_row, public_slots
+        )
+        te = eval_epoch(model, test_dl, device, match_flat_dim, play_loss_weight, pass_row, public_slots)
         hist["train_loss"].append(tr["loss"])
         hist["test_loss"].append(te["loss"])
         hist["train_acc_overall"].append(tr["acc_overall"])
@@ -438,7 +507,7 @@ def train_static_bc(
         hist["test_acc_play"].append(te["acc_play"])
     train_nm, train_np = phase_counts(train_samples)
     test_nm, test_np = phase_counts(test_samples)
-    return model, hist, len(train_ds), len(test_ds), train_nm, train_np, test_nm, test_np
+    return model, hist, len(train_ds), len(test_ds), train_nm, train_np, test_nm, test_np, test_samples
 
 
 def save_plots(out_dir: Path, hist: dict[str, list[float]], size_curve: list[tuple[int, float]]):
@@ -501,46 +570,47 @@ def save_plots(out_dir: Path, hist: dict[str, list[float]], size_curve: list[tup
         plt.close()
 
 
-def _find_multi_match_case(env: Pick14GymEnv):
+def _find_multi_match_case(env: Pick14GymEnv | RlmdObservationWrapper):
+    base = env.unwrapped
+    R = base._max_match_combos
     for seed in range(20260324, 20260324 + 5000):
         obs, _ = env.reset(seed=seed)
-        assert env.state is not None and env._last_encoded is not None
-        enc = env._last_encoded
+        assert base.state is not None
         if float(obs["phase"][0]) >= 0.5:
             continue
-        if int(obs["seq_agent_mask"][:7].sum()) < 7:
+        if int(obs["seq_agent_mask"][:R].sum()) < R:
             continue
-        public_count = int(obs["public_valid"].sum())
+        public_count = len(base.state.public)
         if public_count <= 0:
             continue
         match_valid = int(obs["mask_match"][:, :public_count].sum())
         if match_valid >= 2:
-            return seed, obs, env.state, enc, match_valid
+            return seed, obs, base.state, public_count, match_valid
     return None
 
 
-def print_one_case(env: Pick14GymEnv, out_dir: Path):
+def print_one_case(env: Pick14GymEnv | RlmdObservationWrapper, out_dir: Path):
     found = _find_multi_match_case(env)
     if found is None:
         raise RuntimeError("Could not find a multi-match case in search window")
 
-    seed, obs, st, enc, match_valid = found
-    hand_txt = [str(c) for c in st.hands[0]]
+    seed, obs, st, public_count, match_valid = found
+    base = env.unwrapped
+    hand_txt = [str(c) for c in st.hands[base.learning_player]]
     pub_txt = [str(c) for c in st.public]
+    R = base._max_match_combos
     case = {
         "seed": seed,
         "phase": float(obs["phase"][0]),
         "match_valid_count": match_valid,
         "hand_cards": hand_txt,
         "public_cards": pub_txt,
-        "hand_vecs_9d": obs["hand_vecs"].tolist(),
-        "public_vecs_9d": obs["public_vecs"].tolist(),
-        "mask_7xK": obs["mask_match"].astype(int).tolist(),
+        "mask_match": np.asarray(obs["mask_match"]).astype(int).tolist(),
         "play_hand_valid": obs["play_hand_valid"].astype(int).tolist(),
         "seq_agent_feats_shape": list(obs["seq_agent_feats"].shape),
         "seq_critic_feats_shape": list(obs["seq_critic_feats"].shape),
-        "public_count": enc.public_count,
-        "notes": "mask_match[row=hand_combo_i][col=public_j or pass_col=public_count], 1=valid; rl.md sequences in seq_*",
+        "public_count": public_count,
+        "notes": "mask_match[row][col]: combo rows 0..R-1, pass row R; cols are public indices; rl.md §3.1",
     }
     (out_dir / "one_case_encoding.json").write_text(json.dumps(case, indent=2))
     print("=== One case (human-readable, multiple matches) ===")
@@ -551,16 +621,13 @@ def print_one_case(env: Pick14GymEnv, out_dir: Path):
     print("public cards:")
     for i, c in enumerate(pub_txt):
         print(f"  {i}: {c}")
-    for i in range(7):
-        if int(obs["hand_valid"][i]) == 0:
-            break
-        print(f"  hand_combo[{i}] = {obs['hand_vecs'][i].tolist()}")
-    for j in range(enc.public_count):
-        print(f"  public[{j}] = {obs['public_vecs'][j].tolist()}")
-    for i in range(7):
-        if int(obs["hand_valid"][i]) == 0:
-            break
-        row = obs["mask_match"][i][: enc.public_count + 1].astype(int).tolist()
+    for i in range(R):
+        print(f"  hand_combo_token[{i}] = {obs['seq_agent_feats'][i].tolist()}")
+    for j in range(public_count):
+        tok = base._max_match_combos + 1 + j
+        print(f"  public_pool_token[{j}] = {obs['seq_agent_feats'][tok].tolist()}")
+    for i in range(R):
+        row = obs["mask_match"][i][: public_count].astype(int).tolist()
         print(f"  mask[{i}] = {row}")
 
 
@@ -600,8 +667,12 @@ def main():
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    env = Pick14GymEnv(num_players=2, n_hand=3, seed=args.seed)
-    mfd = env.match_flat_dim
+    from pick14.rl.agents import table_all_baseline
+
+    base_env = Pick14GymEnv(table_all_baseline(2), n_hand=3, seed=args.seed)
+    env = RlmdObservationWrapper(base_env)
+    mfd = base_env.match_flat_dim
+    pass_row = base_env._max_match_combos
 
     size_curve: list[tuple[int, float]] = []
     best = None
@@ -617,10 +688,12 @@ def main():
     for eps in range(args.episodes_start, args.episodes_max + 1, args.episodes_step):
         need = eps - episodes_collected
         if need > 0:
-            samples_cache.extend(collect_teacher_samples(env, episodes=need, seed_base=seed_base + len(samples_cache)))
+            samples_cache.extend(
+                collect_teacher_samples(env, episodes=need, seed_base=seed_base + len(samples_cache))
+            )
             episodes_collected += need
 
-        model, hist, n_train, n_test, tr_nm, tr_np, test_nm, test_np = train_static_bc(
+        model, hist, n_train, n_test, tr_nm, tr_np, test_nm, test_np, _test_samples = train_static_bc(
             samples=samples_cache,
             epochs=args.epochs,
             batch=args.batch,
@@ -630,6 +703,9 @@ def main():
             match_flat_dim=mfd,
             play_loss_weight=args.play_loss_weight,
             hidden_dim=args.hidden_dim,
+            env=base_env,
+            pass_row=pass_row,
+            public_slots=MAX_PUBLIC_SLOTS,
         )
         te_o = float(hist["test_acc_overall"][-1])
         te_m = float(hist["test_acc_match"][-1])

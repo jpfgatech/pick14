@@ -16,7 +16,9 @@ from torch.distributions import Categorical
 
 from pick14.rl.env import Pick14GymEnv
 from pick14.rl.rlmd_model import RLmdPPOAgent
-from pick14.rl.train_bc_static import MAX_KEYS, dual_bc_loss
+from pick14.rl.rlmd_obs import RlmdObservationWrapper
+from pick14.rl.sim_core import MAX_PUBLIC_SLOTS
+from pick14.rl.train_bc_static import dual_bc_loss
 
 
 def to_torch_batch(batch: dict[str, np.ndarray], device: torch.device) -> dict[str, torch.Tensor]:
@@ -75,6 +77,7 @@ def rollout_ppo(
     sum_r_match = sum_r_play = 0.0
     n_m = n_p = 0
     model.eval()
+    base = env.unwrapped
     for ep in range(episodes):
         obs, _ = env.reset(seed=seed_base + ep)
         done = False
@@ -82,7 +85,7 @@ def rollout_ppo(
         steps = 0
         cur: list[Transition] = []
         while not done and steps < max_steps:
-            if env.state is None:
+            if base.state is None:
                 break
             is_match = float(obs["phase"][0]) < 0.5
             obs_t = to_torch_obs1(obs, device)
@@ -96,8 +99,8 @@ def rollout_ppo(
             action = sub if is_match else sub + model.match_flat_dim
             next_obs, rew, term, trunc, _ = env.step(action)
             post = None
-            if not is_match and env._post_play_obs is not None:
-                post = {k: np.asarray(v).copy() for k, v in env._post_play_obs.items()}
+            if not is_match and base._post_play_obs is not None:
+                post = {k: np.asarray(v).copy() for k, v in base._post_play_obs.items()}
             cur.append(
                 Transition(
                     obs={k: v.copy() for k, v in obs.items()},
@@ -290,7 +293,16 @@ def run_bc_quick(
             obs = to_torch(obs_np, device)
             actions = torch.as_tensor(actions_np, device=device)
             ml, pl, _, _ = model(obs)
-            loss, _st = dual_bc_loss(ml, pl, actions, obs, match_flat_dim=mfd, max_keys=MAX_KEYS, play_loss_weight=2.0)
+            loss, _st = dual_bc_loss(
+                ml,
+                pl,
+                actions,
+                obs,
+                match_flat_dim=mfd,
+                pass_row=env.unwrapped._max_match_combos,
+                public_slots=MAX_PUBLIC_SLOTS,
+                play_loss_weight=2.0,
+            )
             opt.zero_grad()
             loss.backward()
             opt.step()
@@ -308,9 +320,12 @@ def main():
     args = ap.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    env = Pick14GymEnv(num_players=2, n_hand=3, seed=args.seed)
-    model = RLmdPPOAgent(dropout=0.0).to(device)
-    mfd = env.match_flat_dim
+    from pick14.rl.agents import table_all_baseline
+
+    base_env = Pick14GymEnv(table_all_baseline(2), n_hand=3, seed=args.seed)
+    env = RlmdObservationWrapper(base_env)
+    model = RLmdPPOAgent.from_env(base_env, dropout=0.0).to(device)
+    mfd = base_env.match_flat_dim
 
     ckpt_path = Path(args.checkpoint) if args.checkpoint else None
     if ckpt_path and ckpt_path.is_file():
