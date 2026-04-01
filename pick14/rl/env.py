@@ -51,6 +51,20 @@ class Pick14GymEnv(gym.Env):
     """
     Seat-0 agent vs choose_dummy_action bots. Default **2 players** (rl.md critic scope).
 
+    **Phase bit in ``obs['phase']``** tracks ``GameState.must_play_only`` (see ``pick14.engine``), not the
+    informal “whole turn” from the rules text:
+
+    - **Match-phase** (``phase < 0.5``): ``must_play_only`` is False. The agent’s legal *gym* actions are
+      the match head (including **pass**, implemented as a ``PlayMove`` on the pass column). Most seat-0
+      timesteps look like this: pass-or-match decisions, or any turn that never entered a forced discard.
+    - **Play-phase** (``phase >= 0.5``): ``must_play_only`` is True. This happens **only** after the agent
+      **scores** a 14-sum match **while the deck is not exhausted**; the engine then draws them to
+      ``n_hand+1`` and requires one discard. If the deck is already exhausted when the match resolves,
+      the engine advances the turn **without** a play-phase step.
+
+    So **BC “play” labels are much rarer than “match” labels**: they count only those forced-discard
+    decisions, not every discard in the card game. That is expected under this MDP, not a dataset bug.
+
     Rewards (rl.md §4.1):
       match phase: r = A_t (agent score points gained this step)
       play phase:  r = -O_t (negative of opponent score points gained before agent acts again)

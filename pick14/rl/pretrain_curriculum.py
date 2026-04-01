@@ -18,7 +18,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from pick14.rl.env import Pick14GymEnv
 from pick14.rl.rlmd_model import RLmdPPOAgent
-from pick14.rl.train_bc_static import Sample, collect_teacher_samples, train_static_bc
+from pick14.rl.train_bc_static import BC_PHASE_SEMANTICS, Sample, collect_teacher_samples, train_static_bc
 
 
 def _sanitize_json(x):
@@ -302,12 +302,19 @@ def main():
         "hist_bc": hist_bc,
         "hist_critic": crit_hist,
         "bc_data_sizes": bc_sizes,
+        "bc_phase_semantics": BC_PHASE_SEMANTICS,
         "config": vars(args),
         "match_flat_dim": mfd,
     }
     torch.save(ckpt, out_dir / "checkpoint_curriculum.pt")
     summary_payload = _sanitize_json(
-        {"bc": hist_bc, "critic": crit_hist, "bc_data_sizes": bc_sizes, "config": vars(args)}
+        {
+            "bc": hist_bc,
+            "critic": crit_hist,
+            "bc_data_sizes": bc_sizes,
+            "bc_phase_semantics": BC_PHASE_SEMANTICS,
+            "config": vars(args),
+        }
     )
     (out_dir / "summary.json").write_text(json.dumps(summary_payload, indent=2, allow_nan=False))
     print(f"Saved {out_dir / 'checkpoint_curriculum.pt'}")

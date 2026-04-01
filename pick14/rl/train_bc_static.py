@@ -17,6 +17,24 @@ from pick14.rl.rlmd_sequences import RLMD_POOL_SLOTS
 
 MAX_KEYS = RLMD_POOL_SLOTS
 
+# Explanatory text for curriculum logs / summary.json (BC label counts vs informal “one play per turn”).
+BC_PHASE_SEMANTICS: dict[str, str] = {
+    "match_phase_obs": (
+        "obs['phase'][0] < 0.5 iff GameState.must_play_only is False. "
+        "Gym actions use the match head (including pass as PlayMove via the pass column). "
+        "This covers the vast majority of seat-0 decision timesteps."
+    ),
+    "play_phase_obs": (
+        "obs['phase'][0] >= 0.5 iff must_play_only is True: forced discard after a scoring match "
+        "while the deck was not exhausted (engine._apply_match)."
+    ),
+    "why_play_labels_are_much_rarer_than_match": (
+        "A play-phase row exists only for that forced-discard decision. Passing without scoring, "
+        "or matching when the deck is exhausted, yields no play-phase row for that turn. "
+        "Greedy teachers that mostly pass therefore produce very few play labels per episode."
+    ),
+}
+
 
 @dataclass(slots=True)
 class Sample:
