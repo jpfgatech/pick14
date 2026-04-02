@@ -68,7 +68,12 @@ def main() -> None:
         "--init-checkpoint",
         type=str,
         default="artifacts/rl_joint_run_agent/checkpoint_curriculum.pt",
-        help="Load actor + trunk; critic stacks replaced and trained from scratch.",
+        help="Load weights; critic stacks reset unless --no-reset-critic (resume streaming run).",
+    )
+    ap.add_argument(
+        "--no-reset-critic",
+        action="store_true",
+        help="Keep critic weights from init checkpoint (continue after a prior streaming run).",
     )
     ap.add_argument("--out-ckpt", type=str, default="artifacts/streaming_critic_64k.pt")
     ap.add_argument("--steps", type=int, default=64_000, help="Number of SGD updates (one row each).")
@@ -98,7 +103,8 @@ def main() -> None:
     model = RLmdPPOAgent.from_env(base_env, dropout=0.0).to(device)
     ckpt = torch.load(init_path, map_location=device, weights_only=False)
     model.load_state_dict(ckpt["model"])
-    reset_critic_stacks(model, dropout=0.0)
+    if not args.no_reset_critic:
+        reset_critic_stacks(model, dropout=0.0)
     freeze_shared_trunk_and_actor(model)
     model.train()
 
@@ -168,6 +174,7 @@ def main() -> None:
                 "lr": args.lr,
                 "policy": args.policy,
                 "init_checkpoint": str(init_path),
+                "critic_reset": not args.no_reset_critic,
                 "collect_chunk_episodes": args.collect_chunk_episodes,
                 "match_rows_from_sim": match_rows_from_sim,
                 "scoring_rows_queued": scoring_rows_queued,
