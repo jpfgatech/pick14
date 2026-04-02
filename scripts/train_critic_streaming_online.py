@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Online match-critic training: **fresh critic heads**, **frozen shared trunk + actor** (only
-``layer2_critic_*`` + critic MLPs train).
+Online match-critic training: **frozen shared trunk + actor** (only ``layer2_critic_*`` + critic MLPs
+train). By default **reinitializes** critic stacks from init checkpoint; use ``--no-reset-critic`` to
+**resume** a prior ``streaming_critic_*.pt``.
 
 No epochs over a fixed dataset: repeatedly **collect** on-policy match rows and apply **one SGD step
 per scoring-legal (non-pass-only) row** until ``--steps`` updates (default 64_000).
@@ -85,6 +86,7 @@ def main() -> None:
     ap.add_argument("--policy", type=str, default="sample", choices=("sample", "deterministic", "teacher"))
     ap.add_argument("--log-every", type=int, default=4000)
     ap.add_argument("--plot-out", type=str, default="artifacts/streaming_critic_64k_ins_oos.png")
+    ap.add_argument("--plot-oos-seed-base", type=int, default=91_000)
     ap.add_argument("--skip-plot", action="store_true")
     args = ap.parse_args()
 
@@ -201,7 +203,7 @@ def main() -> None:
                 "--seed",
                 "42",
                 "--oos-seed-base",
-                "91000",
+                str(args.plot_oos_seed_base),
             ],
             cwd=str(_ROOT),
         )
