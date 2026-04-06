@@ -2,27 +2,23 @@
 """
 Evolutionary algorithm to discover an optimal static play (discard) strategy.
 
-The match phase uses a fixed heuristic (greedy-for-public, §1.5 baseline) for
-**all** agents — both the evolving genomes and every opponent.  The play phase
-is driven by a *genome*: a permutation of the 54 canonical card IDs that
-defines a context-free discard priority.  The EA searches for genomes that
-maximise the average net point gap against a diverse opponent pool.
+**Design principles (v3):**
 
-Evaluation uses *seat-swapped pairs*: for each RNG seed the same deck is played
-twice with the two seat assignments swapped, and the gap is averaged.  This
-perfectly cancels first-mover / deck-luck bias.
+- Every agent (evolving + opponent) uses GFP match.  Only the play permutation
+  varies — the single variable under optimisation.
+- **Hall of Fame (HoF) is the sole evaluation target.**  No intra-generation
+  peer racing.  Fitness = avg seat-swapped gap vs *all* current HoF members.
+- HoF admission is gated: a genome enters only when its avg gap vs HoF > 0
+  (i.e., it beats the average HoF member).  This gets naturally harder as the
+  HoF fills with strong players, so admission becomes increasingly rare.
+- Population is seeded with the baseline genomes (caution, stingy), mutations
+  of them, and random genomes — giving evolution a warm start.
+- Once HoF reaches capacity, a frozen snapshot becomes the **permanent
+  reference** for tracking how later generations compare to that baseline.
 
-Usage (from repo root, venv active)::
+Usage::
 
-    python scripts/evolve_play_strategy.py                       # defaults
-    python scripts/evolve_play_strategy.py --pop 200 --gens 300  # bigger run
-    python scripts/evolve_play_strategy.py --workers 0           # all cores
-
-Outputs are written to ``artifacts/evolve_play/``:
-    - ``progress.jsonl``  per-generation stats (fitness, champion genome)
-    - ``champion.json``   final best genome + metadata
-    - ``fitness.png``     convergence plot
-    - ``priority.png``    champion card priority visualisation
+    python scripts/evolve_play_strategy.py --pop 100 --gens 300 --workers 0
 """
 
 from __future__ import annotations
@@ -41,11 +37,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from pick14.cards import (
-    CANONICAL_DECK_ORDER,
-    game_value,
-    score_value,
-)
+from pick14.cards import CANONICAL_DECK_ORDER, game_value, score_value
 from pick14.rl.genome_agent import (
     N_CARDS,
     genome_seat,
@@ -63,12 +55,11 @@ from pick14.rl.sim_core import (
 )
 
 # ---------------------------------------------------------------------------
-# Fast direct simulation (bypasses Gym overhead)
+# Simulation
 # ---------------------------------------------------------------------------
 
 
 def _play_game_direct(agents: list[Any], seed: int, n_hand: int = 3) -> list[int]:
-    """Run a full game using sim_core primitives.  Returns per-seat scores."""
     rng = Random(seed)
     state: RlPick14State = new_game(len(agents), rng=rng, n_hand=n_hand)
     for _ in range(10_000):
@@ -82,47 +73,42 @@ def _play_game_direct(agents: list[Any], seed: int, n_hand: int = 3) -> list[int
 
 
 def _seat_swapped_gap(agent: Any, opponent: Any, seed: int) -> float:
-    """
-    Play two games with the same deck but swapped seats.
-
-    Returns the luck-cancelled gap: (gap_as_seat0 + gap_as_seat1) / 2.
-    """
-    scores_a = _play_game_direct([agent, opponent], seed)
-    gap_a = scores_a[0] - scores_a[1]
-    scores_b = _play_game_direct([opponent, agent], seed)
-    gap_b = scores_b[1] - scores_b[0]
-    return (gap_a + gap_b) / 2.0
+    """Same deck, both seat orders, averaged.  Perfectly cancels deck luck."""
+    s_a = _play_game_direct([agent, opponent], seed)
+    s_b = _play_game_direct([opponent, agent], seed)
+    return ((s_a[0] - s_a[1]) + (s_b[1] - s_b[0])) / 2.0
 
 
 # ---------------------------------------------------------------------------
-# Reference genomes (permanent opponents, all GFP match)
+# Reference genomes
 # ---------------------------------------------------------------------------
 
 
 def _stingy_genome() -> list[int]:
-    """Genome equivalent of stingy play: (score_value ASC, game_value DESC)."""
-    return sorted(
-        range(N_CARDS),
-        key=lambda i: (score_value(CANONICAL_DECK_ORDER[i]), -game_value(CANONICAL_DECK_ORDER[i])),
-    )
+    return sorted(range(N_CARDS), key=lambda i: (
+        score_value(CANONICAL_DECK_ORDER[i]), -game_value(CANONICAL_DECK_ORDER[i])))
 
 
 def _caution_genome() -> list[int]:
-    """Genome equivalent of caution play: (game_value DESC, score_value ASC)."""
-    return sorted(
-        range(N_CARDS),
-        key=lambda i: (-game_value(CANONICAL_DECK_ORDER[i]), score_value(CANONICAL_DECK_ORDER[i])),
-    )
-
-
-REFERENCE_GENOMES: list[tuple[str, list[int]]] = [
-    ("stingy", _stingy_genome()),
-    ("caution", _caution_genome()),
-]
+    return sorted(range(N_CARDS), key=lambda i: (
+        -game_value(CANONICAL_DECK_ORDER[i]), score_value(CANONICAL_DECK_ORDER[i])))
 
 
 # ---------------------------------------------------------------------------
-# Fitness evaluation
+# HoF entry
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class HoFEntry:
+    genome: list[int]
+    tag: str            # origin: "caution", "stingy", "caution_mut", "stingy_mut", "random", "evolved"
+    gen_admitted: int    # generation when admitted (-1 for seeds)
+    fitness_at_admission: float  # avg gap vs HoF at time of admission
+
+
+# ---------------------------------------------------------------------------
+# Evaluation
 # ---------------------------------------------------------------------------
 
 
@@ -130,69 +116,76 @@ REFERENCE_GENOMES: list[tuple[str, list[int]]] = [
 class EvalResult:
     genome_idx: int
     total_gap: float
-    n_pairs: int  # number of seat-swapped pairs played
+    n_pairs: int
 
     @property
     def fitness(self) -> float:
         return self.total_gap / max(1, self.n_pairs)
 
 
-def _evaluate_genome_vs_opponent_genome(
-    genome: list[int],
-    opp_genome: list[int],
-    n_pairs: int,
-    base_seed: int,
-) -> float:
-    """Luck-cancelled total gap over *n_pairs* seat-swapped pairs."""
-    agent = genome_seat(genome)
-    opp = genome_seat(opp_genome)
-    gap = 0.0
-    for g in range(n_pairs):
-        gap += _seat_swapped_gap(agent, opp, base_seed + g)
-    return gap
-
-
-def evaluate_genome(
+def evaluate_genome_vs_hof(
     genome: list[int],
     genome_idx: int,
-    peer_genomes: list[list[int]],
     hof_genomes: list[list[int]],
-    ref_genomes: list[list[int]],
     n_pairs: int,
     base_seed: int,
 ) -> EvalResult:
-    """Fitness for one genome against peers, HoF, and reference opponents (all GFP match)."""
+    """Fitness = avg seat-swapped gap vs every HoF member."""
+    agent = genome_seat(genome)
     total_gap = 0.0
     total_pairs = 0
-
-    seed_offset = genome_idx * 100_000
-
-    for pi, pg in enumerate(peer_genomes):
-        g = _evaluate_genome_vs_opponent_genome(genome, pg, n_pairs, base_seed + seed_offset + pi * 1000)
-        total_gap += g
-        total_pairs += n_pairs
-
     for hi, hg in enumerate(hof_genomes):
-        g = _evaluate_genome_vs_opponent_genome(genome, hg, n_pairs, base_seed + seed_offset + 50_000 + hi * 1000)
-        total_gap += g
+        opp = genome_seat(hg)
+        for g in range(n_pairs):
+            total_gap += _seat_swapped_gap(agent, opp, base_seed + genome_idx * 100_000 + hi * 1000 + g)
         total_pairs += n_pairs
-
-    for ri, rg in enumerate(ref_genomes):
-        g = _evaluate_genome_vs_opponent_genome(genome, rg, n_pairs, base_seed + seed_offset + 80_000 + ri * 1000)
-        total_gap += g
-        total_pairs += n_pairs
-
     return EvalResult(genome_idx=genome_idx, total_gap=total_gap, n_pairs=total_pairs)
 
 
 def _eval_worker(args: tuple) -> EvalResult:
-    """Top-level for multiprocessing (picklable)."""
-    (genome, genome_idx, peer_genomes, hof_genomes, ref_genomes, n_pairs, base_seed) = args
-    return evaluate_genome(genome, genome_idx, peer_genomes, hof_genomes, ref_genomes, n_pairs, base_seed)
+    genome, genome_idx, hof_genomes, n_pairs, base_seed = args
+    return evaluate_genome_vs_hof(genome, genome_idx, hof_genomes, n_pairs, base_seed)
 
 
 # ---------------------------------------------------------------------------
-# Selection, crossover, mutation
+# Benchmark one genome vs a set of opponents (for reporting)
+# ---------------------------------------------------------------------------
+
+
+def _benchmark_genome(genome: list[int], opponents: list[tuple[str, list[int]]], n_pairs: int, base_seed: int) -> list[dict]:
+    agent = genome_seat(genome)
+    rows = []
+    for oi, (name, og) in enumerate(opponents):
+        opp = genome_seat(og)
+        wins = ties = losses = 0
+        total_gap = 0.0
+        for g in range(n_pairs):
+            gap = _seat_swapped_gap(agent, opp, base_seed + oi * 10_000 + g)
+            total_gap += gap
+            if gap > 0:
+                wins += 1
+            elif gap == 0:
+                ties += 1
+            else:
+                losses += 1
+        rows.append({"name": name, "wins": wins, "ties": ties, "losses": losses,
+                      "avg_gap": total_gap / n_pairs, "n_pairs": n_pairs})
+    return rows
+
+
+def _print_benchmark(rows: list[dict], title: str) -> None:
+    n = rows[0]["n_pairs"] if rows else 0
+    print(f"\n=== {title} ({n} seat-swapped pairs each) ===")
+    print(f"{'Opponent':<30} {'Win%':>6} {'Tie%':>6} {'Loss%':>6} {'AvgGap':>8}")
+    print("-" * 62)
+    for r in rows:
+        t = r["n_pairs"]
+        print(f"{r['name']:<30} {100*r['wins']/t:>5.1f}% {100*r['ties']/t:>5.1f}% "
+              f"{100*r['losses']/t:>5.1f}% {r['avg_gap']:>+7.2f}")
+
+
+# ---------------------------------------------------------------------------
+# Selection & breeding
 # ---------------------------------------------------------------------------
 
 
@@ -208,12 +201,11 @@ def breed_next_generation(
     champion_idx: int,
     rng: Random,
     tournament_k: int = 5,
-    mutation_rate: float = 0.20,
+    mutation_rate: float = 0.25,
     mutation_sigma: float = 3.0,
 ) -> list[list[int]]:
     pop_size = len(population)
     next_gen: list[list[int]] = [list(population[champion_idx])]
-
     while len(next_gen) < pop_size:
         pa = tournament_select(population, fitnesses, tournament_k, rng)
         pb = tournament_select(population, fitnesses, tournament_k, rng)
@@ -221,29 +213,57 @@ def breed_next_generation(
         if rng.random() < mutation_rate:
             child = mutate_swap_nearby(child, rng, sigma=mutation_sigma)
         next_gen.append(child)
-
     return next_gen[:pop_size]
 
 
 # ---------------------------------------------------------------------------
-# Main evolution loop
+# Population seeding
+# ---------------------------------------------------------------------------
+
+
+def seed_population(pop_size: int, rng: Random) -> list[tuple[str, list[int]]]:
+    """
+    Returns (tag, genome) pairs.
+
+    Composition: 2 exact baselines, ~20% caution mutations, ~20% stingy
+    mutations, rest random.
+    """
+    tagged: list[tuple[str, list[int]]] = []
+    cg = _caution_genome()
+    sg = _stingy_genome()
+    tagged.append(("caution", list(cg)))
+    tagged.append(("stingy", list(sg)))
+
+    n_mut_each = max(1, (pop_size - 2) // 5)  # ~20% each
+    for _ in range(n_mut_each):
+        tagged.append(("caution_mut", mutate_swap_nearby(list(cg), rng, sigma=4.0)))
+    for _ in range(n_mut_each):
+        tagged.append(("stingy_mut", mutate_swap_nearby(list(sg), rng, sigma=4.0)))
+
+    while len(tagged) < pop_size:
+        tagged.append(("random", random_genome(rng)))
+
+    return tagged[:pop_size]
+
+
+# ---------------------------------------------------------------------------
+# Main loop
 # ---------------------------------------------------------------------------
 
 
 @dataclass
 class EvolutionConfig:
     pop_size: int = 100
-    n_generations: int = 200
-    n_peers: int = 4
-    n_hof_opponents: int = 4
-    n_pairs: int = 30          # seat-swapped pairs per opponent (= 60 actual games)
+    n_generations: int = 300
+    n_pairs: int = 30
     tournament_k: int = 5
-    mutation_rate: float = 0.20
+    mutation_rate: float = 0.25
     mutation_sigma: float = 3.0
-    hof_max: int = 60
+    hof_max: int = 20
     base_seed: int = 20260406
     workers: int = 1
     out_dir: Path = field(default_factory=lambda: ROOT / "artifacts" / "evolve_play")
+    benchmark_pairs: int = 500
 
 
 def run_evolution(cfg: EvolutionConfig) -> dict[str, Any]:
@@ -251,39 +271,44 @@ def run_evolution(cfg: EvolutionConfig) -> dict[str, Any]:
     cfg.out_dir.mkdir(parents=True, exist_ok=True)
     progress_path = cfg.out_dir / "progress.jsonl"
 
-    population: list[list[int]] = [random_genome(rng) for _ in range(cfg.pop_size)]
+    # Seed population
+    tagged_pop = seed_population(cfg.pop_size, rng)
+    population = [g for _, g in tagged_pop]
+    pop_tags = [t for t, _ in tagged_pop]
 
-    # Dynamic HoF (starts empty, filled with generation champions)
-    hof: list[list[int]] = []
+    # HoF: seeded with the two baselines
+    hof: list[HoFEntry] = [
+        HoFEntry(genome=_caution_genome(), tag="caution", gen_admitted=-1, fitness_at_admission=0.0),
+        HoFEntry(genome=_stingy_genome(), tag="stingy", gen_admitted=-1, fitness_at_admission=0.0),
+    ]
+    hof_ring_idx = 0  # ring-buffer pointer for evolved slots (indices >= 2)
 
-    # Reference genomes: permanent, never overwritten, always in opponent pool
-    ref_genomes = [g for _, g in REFERENCE_GENOMES]
-    ref_names = [n for n, _ in REFERENCE_GENOMES]
+    permanent_ref: list[HoFEntry] | None = None  # frozen once HoF fills up
+    permanent_ref_gen: int = -1
 
-    n_ref = len(ref_genomes)
-    total_opps = cfg.n_peers + cfg.n_hof_opponents + n_ref
-    best_ever_fitness = float("-inf")
+    admissions = 0
     best_ever_genome: list[int] = list(population[0])
+    best_ever_fitness = float("-inf")
 
-    print(f"Evolution: pop={cfg.pop_size}, gens={cfg.n_generations}, "
-          f"workers={cfg.workers}, pairs/opp={cfg.n_pairs} (×2 = {cfg.n_pairs*2} games)")
-    print(f"Opponents: {cfg.n_peers} peers + {cfg.n_hof_opponents} HoF + "
-          f"{n_ref} reference ({', '.join(ref_names)}) = {total_opps} total")
-    print(f"Games per genome per gen: {total_opps} × {cfg.n_pairs*2} = {total_opps * cfg.n_pairs * 2}")
+    hof_genomes_for_eval = [e.genome for e in hof]
+
+    print(f"Evolution v3: pop={cfg.pop_size}, gens={cfg.n_generations}, "
+          f"workers={cfg.workers}, pairs/hof_member={cfg.n_pairs} (×2 games)")
+    print(f"HoF capacity={cfg.hof_max}, seeded with caution + stingy")
+    tag_counts = {}
+    for t in pop_tags:
+        tag_counts[t] = tag_counts.get(t, 0) + 1
+    print(f"Population seed: {tag_counts}")
 
     with open(progress_path, "w") as pf:
         for gen in range(cfg.n_generations):
             t0 = time.time()
 
-            peer_indices = rng.sample(range(cfg.pop_size), min(cfg.n_peers, cfg.pop_size))
-            peer_genomes = [population[i] for i in peer_indices]
-
-            hof_sample = rng.sample(hof, min(cfg.n_hof_opponents, len(hof))) if hof else []
-
             gen_seed = cfg.base_seed + gen * 1_000_000
+            hof_genomes_for_eval = [e.genome for e in hof]
 
             tasks = [
-                (population[i], i, peer_genomes, hof_sample, ref_genomes, cfg.n_pairs, gen_seed)
+                (population[i], i, hof_genomes_for_eval, cfg.n_pairs, gen_seed)
                 for i in range(cfg.pop_size)
             ]
 
@@ -308,36 +333,74 @@ def run_evolution(cfg: EvolutionConfig) -> dict[str, Any]:
                 best_ever_fitness = champion_fit
                 best_ever_genome = list(champion_genome)
 
-            # HoF: append champion (ring-buffer when full)
-            if len(hof) < cfg.hof_max:
-                hof.append(list(champion_genome))
-            else:
-                hof[gen % cfg.hof_max] = list(champion_genome)
+            # HoF admission: avg gap > 0 means this genome beats the HoF on average
+            admitted = False
+            if champion_fit > 0:
+                new_entry = HoFEntry(
+                    genome=list(champion_genome),
+                    tag=f"evolved_gen{gen}",
+                    gen_admitted=gen,
+                    fitness_at_admission=champion_fit,
+                )
+                if len(hof) < cfg.hof_max:
+                    hof.append(new_entry)
+                    admitted = True
+                else:
+                    # Freeze permanent reference the first time HoF is full
+                    if permanent_ref is None:
+                        permanent_ref = [HoFEntry(genome=list(e.genome), tag=e.tag,
+                                                  gen_admitted=e.gen_admitted,
+                                                  fitness_at_admission=e.fitness_at_admission) for e in hof]
+                        permanent_ref_gen = gen
+                        print(f"\n*** Permanent reference frozen at gen {gen} ({len(permanent_ref)} members) ***")
+                        pref_tags = {}
+                        for e in permanent_ref:
+                            base = e.tag.split("_gen")[0] if "evolved" in e.tag else e.tag
+                            pref_tags[base] = pref_tags.get(base, 0) + 1
+                        print(f"    Origins: {pref_tags}\n")
+                    # Replace oldest evolved slot (ring-buffer over indices 2..hof_max-1)
+                    replace_idx = 2 + (hof_ring_idx % (cfg.hof_max - 2))
+                    hof[replace_idx] = new_entry
+                    hof_ring_idx += 1
+                    admitted = True
+                if admitted:
+                    admissions += 1
+
+            # Permanent reference tracking
+            pref_gap: float | None = None
+            if permanent_ref is not None:
+                pr_genomes = [e.genome for e in permanent_ref]
+                pr_result = evaluate_genome_vs_hof(champion_genome, 0, pr_genomes, cfg.n_pairs, gen_seed + 999_000)
+                pref_gap = pr_result.fitness
 
             elapsed = time.time() - t0
             avg_fit = sum(fitnesses) / len(fitnesses)
-            min_fit = min(fitnesses)
-            max_fit = max(fitnesses)
 
-            gen_record = {
+            gen_record: dict[str, Any] = {
                 "gen": gen,
                 "champion_fitness": round(champion_fit, 4),
                 "avg_fitness": round(avg_fit, 4),
-                "min_fitness": round(min_fit, 4),
-                "max_fitness": round(max_fit, 4),
+                "min_fitness": round(min(fitnesses), 4),
+                "max_fitness": round(max(fitnesses), 4),
                 "best_ever_fitness": round(best_ever_fitness, 4),
-                "champion_genome": champion_genome,
+                "hof_size": len(hof),
+                "admitted": admitted,
+                "total_admissions": admissions,
                 "elapsed_s": round(elapsed, 2),
             }
+            if pref_gap is not None:
+                gen_record["pref_gap"] = round(pref_gap, 4)
+            gen_record["champion_genome"] = champion_genome
             pf.write(json.dumps(gen_record) + "\n")
             pf.flush()
 
+            adm_str = " +HoF!" if admitted else ""
+            pref_str = f"  pref={pref_gap:+.2f}" if pref_gap is not None else ""
             print(
                 f"Gen {gen:>4d}/{cfg.n_generations}  "
                 f"champ={champion_fit:+.2f}  avg={avg_fit:+.2f}  "
-                f"[{min_fit:+.2f}, {max_fit:+.2f}]  "
-                f"best_ever={best_ever_fitness:+.2f}  "
-                f"{elapsed:.1f}s"
+                f"hof={len(hof):>2d}  adm={admissions:>3d}"
+                f"{adm_str}{pref_str}  {elapsed:.1f}s"
             )
 
             population = breed_next_generation(
@@ -347,22 +410,21 @@ def run_evolution(cfg: EvolutionConfig) -> dict[str, Any]:
                 mutation_sigma=cfg.mutation_sigma,
             )
 
+    # --- Final outputs ---
     champion_data = {
         "genome": best_ever_genome,
         "fitness": round(best_ever_fitness, 4),
-        "config": {
-            "pop_size": cfg.pop_size,
-            "n_generations": cfg.n_generations,
-            "n_peers": cfg.n_peers,
-            "n_hof_opponents": cfg.n_hof_opponents,
-            "n_pairs": cfg.n_pairs,
-            "base_seed": cfg.base_seed,
-        },
         "card_labels": [_card_label(i) for i in best_ever_genome],
+        "hof_tags": [e.tag for e in hof],
+        "total_admissions": admissions,
     }
+    if permanent_ref is not None:
+        champion_data["permanent_ref_tags"] = [e.tag for e in permanent_ref]
+        champion_data["permanent_ref_gen"] = permanent_ref_gen
+
     champ_path = cfg.out_dir / "champion.json"
     champ_path.write_text(json.dumps(champion_data, indent=2) + "\n")
-    print(f"\nChampion genome saved to {champ_path}")
+    print(f"\nChampion saved → {champ_path}")
 
     _plot_convergence(cfg.out_dir, progress_path)
     _plot_priority(cfg.out_dir, best_ever_genome)
@@ -371,7 +433,7 @@ def run_evolution(cfg: EvolutionConfig) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Card labels & formatting
+# Labels
 # ---------------------------------------------------------------------------
 
 
@@ -395,7 +457,7 @@ def _card_point(card_id: int) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Visualisation
+# Plots
 # ---------------------------------------------------------------------------
 
 
@@ -403,27 +465,43 @@ def _plot_convergence(out_dir: Path, progress_path: Path) -> None:
     try:
         import matplotlib.pyplot as plt
     except ImportError:
-        print("(matplotlib not available — skipping convergence plot)")
+        print("(matplotlib unavailable)")
         return
 
-    gens, champs, avgs, mins, maxes = [], [], [], [], []
-    for line in progress_path.read_text().strip().split("\n"):
-        rec = json.loads(line)
-        gens.append(rec["gen"])
-        champs.append(rec["champion_fitness"])
-        avgs.append(rec["avg_fitness"])
-        mins.append(rec["min_fitness"])
-        maxes.append(rec["max_fitness"])
+    records = [json.loads(l) for l in progress_path.read_text().strip().split("\n")]
+    gens = [r["gen"] for r in records]
+    champs = [r["champion_fitness"] for r in records]
+    avgs = [r["avg_fitness"] for r in records]
+    hof_sizes = [r["hof_size"] for r in records]
+    pref_gaps = [r.get("pref_gap") for r in records]
 
-    fig, ax = plt.subplots(figsize=(10, 5))
-    ax.fill_between(gens, mins, maxes, alpha=0.15, color="steelblue", label="min–max")
-    ax.plot(gens, avgs, color="steelblue", linewidth=1, label="avg fitness")
-    ax.plot(gens, champs, color="crimson", linewidth=1.5, label="champion fitness")
-    ax.set_xlabel("Generation")
+    fig, axes = plt.subplots(2, 1, figsize=(12, 8), sharex=True,
+                             gridspec_kw={"height_ratios": [3, 1]})
+
+    ax = axes[0]
+    ax.plot(gens, champs, color="crimson", linewidth=1.2, label="champion vs HoF")
+    ax.plot(gens, avgs, color="steelblue", linewidth=0.8, label="pop avg vs HoF")
+    if any(p is not None for p in pref_gaps):
+        pg = [(g, p) for g, p in zip(gens, pref_gaps) if p is not None]
+        ax.plot([x[0] for x in pg], [x[1] for x in pg], color="orange",
+                linewidth=1, linestyle="--", label="champion vs perm.ref")
+    ax.axhline(0, color="gray", linewidth=0.5, linestyle=":")
     ax.set_ylabel("Avg Net Point Gap (seat-swapped)")
-    ax.set_title("Evolutionary Play Strategy — Fitness Convergence")
+    ax.set_title("Evolutionary Play Strategy — Fitness Convergence (v3)")
     ax.legend()
     ax.grid(True, alpha=0.3)
+
+    # Admission markers
+    for r in records:
+        if r.get("admitted"):
+            ax.axvline(r["gen"], color="green", alpha=0.15, linewidth=1)
+
+    ax2 = axes[1]
+    ax2.plot(gens, hof_sizes, color="forestgreen", linewidth=1)
+    ax2.set_ylabel("HoF size")
+    ax2.set_xlabel("Generation")
+    ax2.grid(True, alpha=0.3)
+
     fig.tight_layout()
     fig.savefig(out_dir / "fitness.png", dpi=150)
     plt.close(fig)
@@ -431,39 +509,28 @@ def _plot_convergence(out_dir: Path, progress_path: Path) -> None:
 
 
 def _plot_priority(out_dir: Path, genome: list[int]) -> None:
-    """
-    Visualise the champion's discard priority as a ranked card chart.
-
-    Compares evolved priority with caution and stingy orderings.
-    """
     try:
         import matplotlib.pyplot as plt
-        import numpy as np
     except ImportError:
-        print("(matplotlib not available — skipping priority plot)")
         return
 
     caution_g = _caution_genome()
     stingy_g = _stingy_genome()
 
-    # Build priority maps (card_id → rank position, 0 = throw first)
     def priority_map(g: list[int]) -> dict[int, int]:
         return {cid: pos for pos, cid in enumerate(g)}
 
-    evo_pri = priority_map(genome)
-    cau_pri = priority_map(caution_g)
-    sti_pri = priority_map(stingy_g)
+    strategies = [
+        ("Evolved Champion", priority_map(genome)),
+        ("Caution (baseline play)", priority_map(caution_g)),
+        ("Stingy", priority_map(stingy_g)),
+    ]
 
     fig, axes = plt.subplots(1, 3, figsize=(18, 7), sharey=True)
 
-    for ax, (label, pri) in zip(axes, [
-        ("Evolved Champion", evo_pri),
-        ("Caution (baseline play)", cau_pri),
-        ("Stingy", sti_pri),
-    ]):
+    for ax, (label, pri) in zip(axes, strategies):
         cards_sorted = sorted(range(N_CARDS), key=lambda cid: pri[cid])
         labels = [_card_label(cid) for cid in cards_sorted]
-        positions = list(range(N_CARDS))
         points = [_card_point(cid) for cid in cards_sorted]
         digits = [_card_digit(cid) for cid in cards_sorted]
 
@@ -474,26 +541,22 @@ def _plot_priority(out_dir: Path, genome: list[int]) -> None:
                 colors.append("#9b59b6")
             elif c.suit is not None:
                 from pick14.cards import Suit
-                colors.append({
-                    Suit.HEART: "#e74c3c",
-                    Suit.SPADE: "#2c3e50",
-                    Suit.DIAMOND: "#3498db",
-                    Suit.CLUB: "#27ae60",
-                }[c.suit])
+                colors.append({Suit.HEART: "#e74c3c", Suit.SPADE: "#2c3e50",
+                               Suit.DIAMOND: "#3498db", Suit.CLUB: "#27ae60"}[c.suit])
             else:
                 colors.append("gray")
 
+        positions = list(range(N_CARDS))
         ax.barh(positions, [1] * N_CARDS, color=colors, edgecolor="white", linewidth=0.5)
         for i, (lbl, pt, dg) in enumerate(zip(labels, points, digits)):
             ax.text(0.5, i, f"{lbl}  (d={dg} p={pt})", va="center", ha="center",
                     fontsize=6, fontweight="bold", color="white")
-
         ax.set_title(label, fontsize=11, fontweight="bold")
         ax.set_xlim(0, 1)
         ax.set_ylim(-0.5, N_CARDS - 0.5)
         ax.invert_yaxis()
         ax.set_xticks([])
-        ax.set_ylabel("Discard Priority (top = throw first)" if ax == axes[0] else "")
+        ax.set_ylabel("Discard Priority (top = throw first)" if ax is axes[0] else "")
 
     fig.suptitle("Card Discard Priority Comparison", fontsize=13, fontweight="bold")
     fig.tight_layout()
@@ -503,59 +566,11 @@ def _plot_priority(out_dir: Path, genome: list[int]) -> None:
 
 
 def _print_priority_table(genome: list[int]) -> None:
-    """Print the champion's discard priority as a readable table."""
     print("\n=== Champion Discard Priority (1 = throw first, 54 = hoard) ===")
     print(f"{'Pos':>4}  {'Card':<12} {'Digit':>5} {'Point':>5}")
     print("-" * 32)
     for pos, cid in enumerate(genome):
-        lbl = _card_label(cid)
-        print(f"{pos+1:>4}  {lbl:<12} {_card_digit(cid):>5} {_card_point(cid):>5}")
-
-
-# ---------------------------------------------------------------------------
-# Benchmark: champion vs reference play strategies (all GFP match)
-# ---------------------------------------------------------------------------
-
-
-def benchmark_champion(genome: list[int], n_pairs: int = 500, base_seed: int = 99999) -> None:
-    """
-    Head-to-head results of the champion genome against reference strategies.
-
-    All opponents use GFP match (same as the evolving agent).
-    Each matchup plays *n_pairs* seat-swapped pairs for zero-luck comparison.
-    """
-    agent = genome_seat(genome)
-
-    opponents: list[tuple[str, Any]] = [
-        (name, genome_seat(g)) for name, g in REFERENCE_GENOMES
-    ]
-    # Also test against actual baseline_seat() to confirm real-world advantage
-    from pick14.rl.agents import baseline_seat
-    opponents.append(("baseline_seat (real)", baseline_seat()))
-
-    print(f"\n=== Champion vs Reference Strategies ({n_pairs} seat-swapped pairs each) ===")
-    print(f"{'Opponent':<25} {'Win%':>6} {'Tie%':>6} {'Loss%':>6} {'AvgGap':>8}")
-    print("-" * 57)
-
-    for name, opp in opponents:
-        wins = ties = losses = 0
-        total_gap = 0.0
-        for g in range(n_pairs):
-            seed = base_seed + g
-            gap = _seat_swapped_gap(agent, opp, seed)
-            total_gap += gap
-            if gap > 0:
-                wins += 1
-            elif gap == 0:
-                ties += 1
-            else:
-                losses += 1
-
-        avg_gap = total_gap / n_pairs
-        print(
-            f"{name:<25} {100*wins/n_pairs:>5.1f}% {100*ties/n_pairs:>5.1f}% "
-            f"{100*losses/n_pairs:>5.1f}% {avg_gap:>+7.2f}"
-        )
+        print(f"{pos+1:>4}  {_card_label(cid):<12} {_card_digit(cid):>5} {_card_point(cid):>5}")
 
 
 # ---------------------------------------------------------------------------
@@ -565,22 +580,21 @@ def benchmark_champion(genome: list[int], n_pairs: int = 500, base_seed: int = 9
 
 def main() -> None:
     p = argparse.ArgumentParser(
-        description="Evolve a static play (discard) strategy for Pick14.",
+        description="Evolve a static play (discard) strategy for Pick14 (v3: HoF-centric).",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("--pop", type=int, default=100, help="Population size")
-    p.add_argument("--gens", type=int, default=200, help="Number of generations")
-    p.add_argument("--peers", type=int, default=4, help="Peer opponents per eval")
-    p.add_argument("--hof-opps", type=int, default=4, help="HoF opponents per eval")
-    p.add_argument("--pairs", type=int, default=30, help="Seat-swapped pairs per opponent (×2 actual games)")
-    p.add_argument("--tournament-k", type=int, default=5, help="Tournament selection size")
-    p.add_argument("--mutation-rate", type=float, default=0.20, help="Mutation probability")
-    p.add_argument("--mutation-sigma", type=float, default=3.0, help="Swap distance std dev")
-    p.add_argument("--hof-max", type=int, default=60, help="Max Hall of Fame size")
-    p.add_argument("--seed", type=int, default=20260406, help="Base RNG seed")
-    p.add_argument("--workers", type=int, default=1, help="Parallel workers (0 = cpu_count)")
+    p.add_argument("--gens", type=int, default=300, help="Generations")
+    p.add_argument("--pairs", type=int, default=30, help="Seat-swapped pairs per HoF member")
+    p.add_argument("--tournament-k", type=int, default=5)
+    p.add_argument("--mutation-rate", type=float, default=0.25)
+    p.add_argument("--mutation-sigma", type=float, default=3.0)
+    p.add_argument("--hof-max", type=int, default=20, help="HoF capacity")
+    p.add_argument("--seed", type=int, default=20260406)
+    p.add_argument("--workers", type=int, default=1, help="0 = all cores")
     p.add_argument("--out-dir", type=Path, default=ROOT / "artifacts" / "evolve_play")
-    p.add_argument("--benchmark-pairs", type=int, default=500, help="Seat-swapped pairs per opponent in final benchmark")
+    p.add_argument("--benchmark-pairs", type=int, default=500,
+                   help="Seat-swapped pairs for final benchmark")
     args = p.parse_args()
 
     import os
@@ -589,8 +603,6 @@ def main() -> None:
     cfg = EvolutionConfig(
         pop_size=args.pop,
         n_generations=args.gens,
-        n_peers=args.peers,
-        n_hof_opponents=args.hof_opps,
         n_pairs=args.pairs,
         tournament_k=args.tournament_k,
         mutation_rate=args.mutation_rate,
@@ -599,11 +611,46 @@ def main() -> None:
         base_seed=args.seed,
         workers=workers,
         out_dir=args.out_dir,
+        benchmark_pairs=args.benchmark_pairs,
     )
 
     result = run_evolution(cfg)
+
     _print_priority_table(result["genome"])
-    benchmark_champion(result["genome"], n_pairs=args.benchmark_pairs, base_seed=cfg.base_seed + 9_999_999)
+
+    # Final benchmark vs reference genomes + real baseline_seat
+    ref_opponents: list[tuple[str, list[int]]] = [
+        ("caution (GFP+caution genome)", _caution_genome()),
+        ("stingy (GFP+stingy genome)", _stingy_genome()),
+    ]
+    bm_rows = _benchmark_genome(result["genome"], ref_opponents, cfg.benchmark_pairs, cfg.base_seed + 9_000_000)
+    _print_benchmark(bm_rows, "Champion vs Reference Genomes")
+
+    # Also test against the real baseline_seat (actual caution policy, not genome approx)
+    from pick14.rl.agents import baseline_seat
+    agent = genome_seat(result["genome"])
+    real_bl = baseline_seat()
+    wins = ties = losses = 0
+    total_gap = 0.0
+    for g in range(cfg.benchmark_pairs):
+        gap = _seat_swapped_gap(agent, real_bl, cfg.base_seed + 8_000_000 + g)
+        total_gap += gap
+        if gap > 0: wins += 1
+        elif gap == 0: ties += 1
+        else: losses += 1
+    n = cfg.benchmark_pairs
+    print(f"\n{'baseline_seat (real)':<30} {100*wins/n:>5.1f}% {100*ties/n:>5.1f}% "
+          f"{100*losses/n:>5.1f}% {total_gap/n:>+7.2f}")
+
+    # HoF composition report
+    if "permanent_ref_tags" in result:
+        print(f"\nPermanent reference (frozen at gen {result['permanent_ref_gen']}):")
+        tag_counts: dict[str, int] = {}
+        for t in result["permanent_ref_tags"]:
+            base = t.split("_gen")[0] if "evolved" in t else t
+            tag_counts[base] = tag_counts.get(base, 0) + 1
+        for t, c in sorted(tag_counts.items(), key=lambda x: -x[1]):
+            print(f"  {t}: {c}")
 
 
 if __name__ == "__main__":
