@@ -4,80 +4,124 @@
 
 Discover a high-quality, **context-free** 54-card priority sequence for the
 Play (discard) phase of Pick14.  The Match phase is locked to the greedy-for-public
-heuristic (§1.5 baseline).  The only degree of freedom is the order in which
-cards are discarded — captured by a single permutation of the 54 canonical card IDs.
+heuristic (§1.5 baseline).  The only variable is the order in which cards are
+discarded — a single permutation of the 54 canonical card IDs.
 
 ---
 
-## Representation
+## Lessons Learned (v1–v3)
 
-### Genome
+### 1. Pairwise fitness is not transitive
 
-An integer array of length 54.  Each element is a unique card ID (`0–53`,
-indexing `pick14.cards.CANONICAL_DECK_ORDER`).
+Beating a weak opponent by +10 can be far worse than beating a strong one by
++1.  Intra-generation peer racing conflates these — a genome can dominate weak
+peers without ever proving strength against competitive play.
 
-- **Index 0** → highest discard priority ("throw this first").
-- **Index 53** → lowest discard priority ("hoard this").
+**Fix:** Remove peer racing entirely.  Fitness is measured exclusively against
+the Hall of Fame (a curated pool of historically strong genomes).
 
-At play time, the `GenomePlayPolicy` precomputes an inverse map
-`priority[card_id] = position` for O(1) lookup.  It scans the hand, finds the
-card with the *lowest* priority position, and returns `PlayMove(hand_index)`.
+### 2. Mixed match policies pollute the signal
 
-### Seat Agent
+If the evolving agent uses GFP match but opponents use other match policies
+(pass, greedy-stingy), the fitness signal is dominated by irrelevant match
+differences.  A genome that "beats" pass-match opponents learns nothing about
+play quality.
 
-`genome_seat(genome)` bundles `GreedyForPublicMatchPolicy` + `GenomePlayPolicy`
-into a `CompositeSeatAgent` compatible with both the Gym env and direct sim_core
-simulation.
+**Fix:** Every agent — evolving and opponent — uses GFP match.  The play
+permutation is the sole variable.
+
+### 3. Deck luck must be cancelled, not averaged
+
+Alternating seat 0/1 across different seeds still leaves variance.  Playing the
+*same* deck in *both* seat orders and averaging the gap perfectly cancels
+first-mover / deck-luck bias.
+
+### 4. Unconstrained search space is too large
+
+54! ≈ 2.3 × 10⁷¹ permutations.  Most are dominated — e.g., discarding 9♥
+(p=4) while holding 9♣ (p=1) is never correct.  The EA converges to the
+nearest local optimum (caution) without exploring subtle interleavings.
+
+**Fix:** Dominance constraints (see below) shrink the search space to the set
+of Standard Young Tableaux on a 13×4 grid — still combinatorially large, but
+every member is a strategically coherent ordering.
 
 ---
 
-## Evolutionary Loop
+## Constrained Genome Representation (v4)
 
-### Initialisation
+### Dominance constraints
 
-| Component | Detail |
-|-----------|--------|
-| **Population** | `pop_size` random permutations (default 100) |
-| **Hall of Fame** | Seeded with genome-equivalents of stingy play and caution play |
-| **Static opponents** | The 6 §1.5 seat bundles (always included in fitness eval) |
+A valid genome must satisfy:
 
-### Fitness Evaluation
+1. **Same digit → sorted by point (ascending):** Among cards with identical
+   matching power (game digit), the lower-point card is always discarded first.
+   Discarding the more valuable card when a cheaper equivalent exists is
+   dominated.
 
-For each genome:
+2. **Same point → sorted by digit (descending):** Among cards with equal
+   scoring value (suit/joker point), the higher-digit card is always discarded
+   first.  High digits are easy for opponents to match; low digits are harder
+   to pair and safer to hold.
 
-1. **Peer opponents:** `n_peers` random genomes from the current generation (default 4).
-2. **HoF opponents:** `n_hof_opponents` random entries from the Hall of Fame (default 2).
-3. **Static opponents:** All 6 §1.5 seat strategies.
-4. **Games per opponent:** `n_games_per_opponent` (default 50), with seat 0/1 alternating every game to remove first-mover bias.
-5. **Fitness** = average net point gap (agent score − opponent score) across all games.
+These constraints define a partial order equivalent to a Standard Young Tableau
+on a 13×4 grid (rows = digits, columns = point values).
 
-Total games per genome per generation: `(4 + 2 + 6) × 50 = 600`.
+### Grid-swap mutation (constraint-preserving)
 
-The evaluation is embarrassingly parallel across genomes and uses a
-`ProcessPoolExecutor` when `--workers > 1`.
+1. Randomly select priority slot *v* ∈ [0, 52].
+2. Get the (digit, point) coordinates of the cards at slots *v* and *v+1*.
+3. **If** they are in different rows (digits) **and** different columns
+   (points): swap them.  **Else:** retry.
 
-### Selection & Elitism
+This preserves both row and column monotonicity by construction — no post-swap
+repair needed.  Multiple swaps are applied per offspring for adequate
+exploration.
 
-1. **Champion** = highest-fitness genome; copied verbatim to next generation.
-2. **HoF update:** champion appended (ring-buffer when full, default 60 entries).
-3. **Breeding:** tournament selection (k=5) picks parents A and B; OX1 crossover produces a child.
+### Blended crossover with topological-sort repair
 
-### OX1 Crossover
+1. Compute each card's priority rank in both parents.
+2. Blend with random weight α ∈ [0.3, 0.7].
+3. Sort cards by blended priority (random tiebreak for equal blends).
+4. Repair any constraint violations via topological sort (Kahn's algorithm
+   with the input ordering as tiebreaker).
 
-Preserves relative order — required because the genome is a permutation.
+### Repair algorithm
 
-1. Copy a random contiguous slice from parent A into the child at the same positions.
-2. Fill remaining slots left-to-right with cards from parent B in their original order, skipping those already placed.
+Given an arbitrary permutation, the repair produces the valid genome that
+preserves the input ordering as much as possible:
 
-### Mutation
+1. Build a DAG from the dominance partial order (consecutive pairs within
+   each digit group and each point group).
+2. Run Kahn's algorithm: at each step, emit the available card that appeared
+   earliest in the input.
 
-Distance-weighted swap (applied with probability `mutation_rate`, default 20%):
+This is O(n²) worst case for n = 54 — negligible.
 
-1. Pick random index *x*.
-2. Sample jump *d* = max(1, |N(0, σ)|) with σ = 3.
-3. Swap `genome[x]` ↔ `genome[(x ± d) % 54]`.
+---
 
-This makes small priority adjustments without destroying inherited structure.
+## Evaluation (HoF-centric)
+
+### Hall of Fame as sole evaluation target
+
+- **No intra-generation peer racing.**  Fitness = average seat-swapped gap
+  against *all* current HoF members.
+- HoF seeded with caution and stingy genomes (the two known-good baselines).
+- Admission gated: a genome enters HoF only when its avg gap vs HoF > 0.
+  As the HoF fills with strong players, admission becomes naturally harder.
+- Once HoF reaches capacity, a frozen **permanent reference** snapshot is
+  saved for tracking long-term progress.
+
+### Seat-swapped evaluation
+
+For each RNG seed, the same deck is played twice with swapped seat assignments.
+The gap is averaged across both orientations, perfectly cancelling luck.
+
+### Population seeding
+
+- 2 exact baselines (caution, stingy)
+- ~20% mutations of caution, ~20% mutations of stingy
+- Rest: random valid genomes (constrained-shuffled from caution)
 
 ---
 
@@ -85,9 +129,9 @@ This makes small priority adjustments without destroying inherited structure.
 
 | Path | Role |
 |------|------|
-| `pick14/rl/genome_agent.py` | `GenomePlayPolicy`, `genome_seat`, crossover/mutation operators |
-| `scripts/evolve_play_strategy.py` | CLI entry point: evolution loop, benchmark, plotting |
-| `tests/test_genome_agent.py` | Unit tests: policy correctness, OX1 validity, mutation invariants |
+| `pick14/rl/genome_agent.py` | `GenomePlayPolicy`, constraint validation, grid-swap mutation, blended crossover, topological-sort repair |
+| `scripts/evolve_play_strategy.py` | CLI: HoF-centric evolution loop, benchmark, convergence + priority plots |
+| `tests/test_genome_agent.py` | 19 tests: constraints, repair, mutation, crossover, policy, full-game smoke |
 | `evolving_play_strategy.md` | This document |
 
 ---
@@ -95,47 +139,24 @@ This makes small priority adjustments without destroying inherited structure.
 ## Usage
 
 ```bash
-# Activate the project venv
 source ~/Documents/projects/venv/bin/activate
 cd ~/Documents/projects/pick14
 
-# Quick smoke test (< 10 s)
-python scripts/evolve_play_strategy.py --pop 10 --gens 5 --games 10
+# Quick smoke test
+python scripts/evolve_play_strategy.py --pop 15 --gens 5 --pairs 5 --hof-max 5
 
-# Full run with parallelism
-python scripts/evolve_play_strategy.py --pop 100 --gens 300 --workers 8
+# Full run (all CPU cores)
+python scripts/evolve_play_strategy.py --pop 100 --gens 300 --workers 0
 
-# All CLI flags
+# All flags
 python scripts/evolve_play_strategy.py --help
 ```
 
-### Outputs (default `artifacts/evolve_play/`)
+### Outputs (`artifacts/evolve_play/`)
 
 | File | Content |
 |------|---------|
-| `progress.jsonl` | Per-generation stats: fitness range, champion genome |
-| `champion.json` | Best genome found, human-readable card labels, config |
-| `fitness.png` | Convergence plot (champion, avg, min–max band) |
-
-After evolution, a head-to-head benchmark of the champion vs all 6 static
-strategies is printed to stdout.
-
----
-
-## Design Decisions
-
-1. **Direct simulation** — games are run via `sim_core` (`new_game`, `apply_move`,
-   `is_finished`) instead of `Pick14GymEnv`, avoiding observation encoding and
-   mask computation.  This gives ~5-10× throughput improvement per game.
-
-2. **Seat alternation** — each opponent match plays half the games as seat 0 and
-   half as seat 1 to cancel first-mover advantage.
-
-3. **Static opponents always included** — ensures the evolved genome never
-   regresses below the quality of hand-crafted strategies; the HoF only
-   augments this baseline pressure.
-
-4. **HoF seeded with heuristic genomes** — the stingy and caution play policies
-   are converted to static priority orderings (by their sort keys) and placed
-   in the HoF at generation 0.  This gives the EA a meaningful performance
-   floor from the start.
+| `progress.jsonl` | Per-gen stats: fitness, HoF size, admissions, perm-ref gap |
+| `champion.json` | Best genome, card labels, HoF composition |
+| `fitness.png` | Convergence plot (champion, avg, perm-ref tracking) |
+| `priority.png` | 3-column card priority comparison (evolved vs caution vs stingy) |

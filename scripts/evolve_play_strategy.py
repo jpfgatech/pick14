@@ -2,7 +2,7 @@
 """
 Evolutionary algorithm to discover an optimal static play (discard) strategy.
 
-**Design principles (v3):**
+**Design principles (v4 — constrained genomes):**
 
 - Every agent (evolving + opponent) uses GFP match.  Only the play permutation
   varies — the single variable under optimisation.
@@ -37,13 +37,19 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from pick14.cards import CANONICAL_DECK_ORDER, game_value, score_value
+from pick14.cards import CANONICAL_DECK_ORDER
 from pick14.rl.genome_agent import (
     N_CARDS,
+    card_digit_of_id,
+    card_point_of_id,
+    caution_genome,
+    constrained_crossover,
+    constrained_swap_mutation,
     genome_seat,
-    mutate_swap_nearby,
-    ox1_crossover,
-    random_genome,
+    is_valid_constrained,
+    random_valid_genome,
+    repair_genome,
+    stingy_genome,
 )
 from pick14.rl.sim_core import (
     RlPick14State,
@@ -84,14 +90,10 @@ def _seat_swapped_gap(agent: Any, opponent: Any, seed: int) -> float:
 # ---------------------------------------------------------------------------
 
 
-def _stingy_genome() -> list[int]:
-    return sorted(range(N_CARDS), key=lambda i: (
-        score_value(CANONICAL_DECK_ORDER[i]), -game_value(CANONICAL_DECK_ORDER[i])))
-
-
-def _caution_genome() -> list[int]:
-    return sorted(range(N_CARDS), key=lambda i: (
-        -game_value(CANONICAL_DECK_ORDER[i]), score_value(CANONICAL_DECK_ORDER[i])))
+REFERENCE_GENOMES: list[tuple[str, list[int]]] = [
+    ("stingy", stingy_genome()),
+    ("caution", caution_genome()),
+]
 
 
 # ---------------------------------------------------------------------------
@@ -201,17 +203,17 @@ def breed_next_generation(
     champion_idx: int,
     rng: Random,
     tournament_k: int = 5,
-    mutation_rate: float = 0.25,
-    mutation_sigma: float = 3.0,
+    mutation_rate: float = 0.30,
+    mutation_n_swaps: int = 3,
 ) -> list[list[int]]:
     pop_size = len(population)
     next_gen: list[list[int]] = [list(population[champion_idx])]
     while len(next_gen) < pop_size:
         pa = tournament_select(population, fitnesses, tournament_k, rng)
         pb = tournament_select(population, fitnesses, tournament_k, rng)
-        child = ox1_crossover(pa, pb, rng)
+        child = constrained_crossover(pa, pb, rng)
         if rng.random() < mutation_rate:
-            child = mutate_swap_nearby(child, rng, sigma=mutation_sigma)
+            child = constrained_swap_mutation(child, rng, n_swaps=mutation_n_swaps)
         next_gen.append(child)
     return next_gen[:pop_size]
 
@@ -223,25 +225,25 @@ def breed_next_generation(
 
 def seed_population(pop_size: int, rng: Random) -> list[tuple[str, list[int]]]:
     """
-    Returns (tag, genome) pairs.
+    Returns (tag, genome) pairs.  All genomes satisfy the dominance constraints.
 
     Composition: 2 exact baselines, ~20% caution mutations, ~20% stingy
-    mutations, rest random.
+    mutations, rest random valid genomes.
     """
     tagged: list[tuple[str, list[int]]] = []
-    cg = _caution_genome()
-    sg = _stingy_genome()
+    cg = caution_genome()
+    sg = stingy_genome()
     tagged.append(("caution", list(cg)))
     tagged.append(("stingy", list(sg)))
 
-    n_mut_each = max(1, (pop_size - 2) // 5)  # ~20% each
+    n_mut_each = max(1, (pop_size - 2) // 5)
     for _ in range(n_mut_each):
-        tagged.append(("caution_mut", mutate_swap_nearby(list(cg), rng, sigma=4.0)))
+        tagged.append(("caution_mut", constrained_swap_mutation(list(cg), rng, n_swaps=5)))
     for _ in range(n_mut_each):
-        tagged.append(("stingy_mut", mutate_swap_nearby(list(sg), rng, sigma=4.0)))
+        tagged.append(("stingy_mut", constrained_swap_mutation(list(sg), rng, n_swaps=5)))
 
     while len(tagged) < pop_size:
-        tagged.append(("random", random_genome(rng)))
+        tagged.append(("random", random_valid_genome(rng, n_shuffles=500)))
 
     return tagged[:pop_size]
 
@@ -257,8 +259,8 @@ class EvolutionConfig:
     n_generations: int = 300
     n_pairs: int = 30
     tournament_k: int = 5
-    mutation_rate: float = 0.25
-    mutation_sigma: float = 3.0
+    mutation_rate: float = 0.30
+    mutation_n_swaps: int = 3
     hof_max: int = 20
     base_seed: int = 20260406
     workers: int = 1
@@ -278,8 +280,8 @@ def run_evolution(cfg: EvolutionConfig) -> dict[str, Any]:
 
     # HoF: seeded with the two baselines
     hof: list[HoFEntry] = [
-        HoFEntry(genome=_caution_genome(), tag="caution", gen_admitted=-1, fitness_at_admission=0.0),
-        HoFEntry(genome=_stingy_genome(), tag="stingy", gen_admitted=-1, fitness_at_admission=0.0),
+        HoFEntry(genome=caution_genome(), tag="caution", gen_admitted=-1, fitness_at_admission=0.0),
+        HoFEntry(genome=stingy_genome(), tag="stingy", gen_admitted=-1, fitness_at_admission=0.0),
     ]
     hof_ring_idx = 0  # ring-buffer pointer for evolved slots (indices >= 2)
 
@@ -407,7 +409,7 @@ def run_evolution(cfg: EvolutionConfig) -> dict[str, Any]:
                 population, fitnesses, champion_idx, rng,
                 tournament_k=cfg.tournament_k,
                 mutation_rate=cfg.mutation_rate,
-                mutation_sigma=cfg.mutation_sigma,
+                mutation_n_swaps=cfg.mutation_n_swaps,
             )
 
     # --- Final outputs ---
@@ -449,11 +451,11 @@ def _card_label(card_id: int) -> str:
 
 
 def _card_digit(card_id: int) -> int:
-    return game_value(CANONICAL_DECK_ORDER[card_id])
+    return card_digit_of_id(card_id)
 
 
 def _card_point(card_id: int) -> int:
-    return score_value(CANONICAL_DECK_ORDER[card_id])
+    return card_point_of_id(card_id)
 
 
 # ---------------------------------------------------------------------------
@@ -514,8 +516,8 @@ def _plot_priority(out_dir: Path, genome: list[int]) -> None:
     except ImportError:
         return
 
-    caution_g = _caution_genome()
-    stingy_g = _stingy_genome()
+    caution_g = caution_genome()
+    stingy_g = stingy_genome()
 
     def priority_map(g: list[int]) -> dict[int, int]:
         return {cid: pos for pos, cid in enumerate(g)}
@@ -587,8 +589,8 @@ def main() -> None:
     p.add_argument("--gens", type=int, default=300, help="Generations")
     p.add_argument("--pairs", type=int, default=30, help="Seat-swapped pairs per HoF member")
     p.add_argument("--tournament-k", type=int, default=5)
-    p.add_argument("--mutation-rate", type=float, default=0.25)
-    p.add_argument("--mutation-sigma", type=float, default=3.0)
+    p.add_argument("--mutation-rate", type=float, default=0.30)
+    p.add_argument("--mutation-swaps", type=int, default=3, help="Grid swaps per mutation")
     p.add_argument("--hof-max", type=int, default=20, help="HoF capacity")
     p.add_argument("--seed", type=int, default=20260406)
     p.add_argument("--workers", type=int, default=1, help="0 = all cores")
@@ -606,7 +608,7 @@ def main() -> None:
         n_pairs=args.pairs,
         tournament_k=args.tournament_k,
         mutation_rate=args.mutation_rate,
-        mutation_sigma=args.mutation_sigma,
+        mutation_n_swaps=args.mutation_swaps,
         hof_max=args.hof_max,
         base_seed=args.seed,
         workers=workers,
@@ -620,8 +622,8 @@ def main() -> None:
 
     # Final benchmark vs reference genomes + real baseline_seat
     ref_opponents: list[tuple[str, list[int]]] = [
-        ("caution (GFP+caution genome)", _caution_genome()),
-        ("stingy (GFP+stingy genome)", _stingy_genome()),
+        ("caution (GFP+caution genome)", caution_genome()),
+        ("stingy (GFP+stingy genome)", stingy_genome()),
     ]
     bm_rows = _benchmark_genome(result["genome"], ref_opponents, cfg.benchmark_pairs, cfg.base_seed + 9_000_000)
     _print_benchmark(bm_rows, "Champion vs Reference Genomes")
