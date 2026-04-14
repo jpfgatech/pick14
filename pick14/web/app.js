@@ -320,6 +320,8 @@ function pollUntilHuman() {
 }
 
 async function newGame() {
+  // cancel any poll still running from a previous game
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
   const n = Math.min(8, Math.max(2, parseInt(document.getElementById("numPlayers").value, 10) || 2));
   document.getElementById("numPlayers").value = String(n);
   const seedRaw = document.getElementById("seed").value.trim();
