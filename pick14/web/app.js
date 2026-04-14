@@ -404,11 +404,15 @@ function renderStats(byPlayers) {
     const nw       = s.n_player_win ?? 0;
     const nt       = s.n_tie        ?? 0;
     const nl       = s.n_ai_win     ?? 0;
-    const winPct   = s.n_games > 0 ? ((nw / s.n_games) * 100).toFixed(1) : "—";
+    const nObs     = s.n_obs ?? s.n_games;   // per-seat observations
+    const winPct   = nObs > 0 ? ((nw / nObs) * 100).toFixed(1) : "—";
     const winClass = nw > nl ? "stats-note--good" : nw < nl ? "stats-note--bad" : "";
+    const gamesLabel = (s.n_obs && s.n_obs !== s.n_games)
+      ? `${s.n_games} (${s.n_obs} seats)`
+      : String(s.n_games);
     [
       `${k}p`,
-      String(s.n_games),
+      gamesLabel,
       `${nw}W / ${nt}T / ${nl}L`,
       `${winPct}%`,
       `${gap >= 0 ? "+" : ""}${gap.toFixed(2)} pts`,

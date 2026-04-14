@@ -46,10 +46,13 @@ from pick14.serialize import state_from_dict, state_to_dict
 DATA_DIR   = Path(__file__).resolve().parent.parent / "data"
 STATS_PATH = DATA_DIR / "stats.json"
 
-# In-memory stats:
-# {str(n_players): {"n": int, "sum": float, "sum_sq": float,
-#                   "n_player_win": int, "n_tie": int, "n_ai_win": int}}
-# Older records that lack the win/tie/loss fields are treated as all AI wins.
+# In-memory stats per player-count key:
+#   n_games     – number of completed games
+#   n           – number of per-seat pairwise (agent vs player) observations
+#                 = n_games for 2-player; = n_games*(n_players-1) for N-player
+#   sum/sum_sq  – running totals of per-seat gap (agent_score − player_score)
+#   n_player_win/n_tie/n_ai_win – per-seat outcome counts
+# Old records without n_games default to n_games = n (backwards compat).
 _stats: dict[str, dict] = {}
 
 
@@ -73,22 +76,29 @@ def _save_stats() -> None:
     os.replace(tmp, STATS_PATH)
 
 
-def _record_game(n_players: int, gap: float) -> None:
-    """gap = mean(agent_scores) − player_score  (positive ⇒ AI wins)."""
+def _record_game(n_players: int, player_score: float, agent_scores: list[float]) -> None:
+    """Record one completed game.  Each agent seat is a separate observation so
+    variance is per-seat rather than per-game (matters for N>2 games)."""
     key = str(n_players)
     if key not in _stats:
-        _stats[key] = {"n": 0, "sum": 0.0, "sum_sq": 0.0,
+        _stats[key] = {"n_games": 0, "n": 0, "sum": 0.0, "sum_sq": 0.0,
                        "n_player_win": 0, "n_tie": 0, "n_ai_win": 0}
     s = _stats[key]
-    s["n"]      += 1
-    s["sum"]    += gap
-    s["sum_sq"] += gap * gap
-    if gap < 0:      # player beats mean-agent
-        s["n_player_win"] = s.get("n_player_win", 0) + 1
-    elif gap == 0:   # exact tie
-        s["n_tie"]        = s.get("n_tie", 0) + 1
-    else:            # AI wins
-        s["n_ai_win"]     = s.get("n_ai_win", 0) + 1
+    # migrate old records that only stored "n" (no "n_games")
+    if "n_games" not in s:
+        s["n_games"] = s.get("n", 0)
+    s["n_games"] += 1
+    for a_score in agent_scores:
+        gap = a_score - player_score
+        s["n"]      += 1
+        s["sum"]    += gap
+        s["sum_sq"] += gap * gap
+        if gap < 0:
+            s["n_player_win"] = s.get("n_player_win", 0) + 1
+        elif gap == 0:
+            s["n_tie"]    = s.get("n_tie", 0) + 1
+        else:
+            s["n_ai_win"] = s.get("n_ai_win", 0) + 1
     _save_stats()
 
 
@@ -268,7 +278,7 @@ def human_move(session_id: str, body: HumanMoveIn):
     sess.undo.on_human_committed(st)
     _run_bots(sess)
 
-    # Record stats when the game finishes
+    # Record stats when the game finishes (per-seat observations)
     if is_finished(st):
         n            = st.num_players
         player_score = total_score_points(st, sess.human_seat)
@@ -276,8 +286,7 @@ def human_move(session_id: str, body: HumanMoveIn):
             total_score_points(st, p) for p in range(n) if p != sess.human_seat
         ]
         if agent_scores:
-            gap = sum(agent_scores) / len(agent_scores) - player_score
-            _record_game(n, gap)
+            _record_game(n, player_score, agent_scores)
 
     return _view(st, sess.human_seat)
 
@@ -299,17 +308,19 @@ def get_stats():
     """Return per-player-count game statistics."""
     result: dict[str, dict] = {}
     for key, s in sorted(_stats.items(), key=lambda x: int(x[0])):
-        n = s["n"]
-        if n == 0:
+        n_obs   = s["n"]          # per-seat observations
+        n_games = s.get("n_games", n_obs)  # old records: n_games == n
+        if n_obs == 0:
             continue
-        mean     = s["sum"] / n
-        variance = max(0.0, s["sum_sq"] / n - mean * mean)
+        mean     = s["sum"] / n_obs
+        variance = max(0.0, s["sum_sq"] / n_obs - mean * mean)
         n_player_win = s.get("n_player_win", 0)
         n_tie        = s.get("n_tie", 0)
-        # games recorded before win-tracking was added → count as AI wins
-        n_ai_win     = s.get("n_ai_win", n - n_player_win - n_tie)
+        # records without win fields (pre-tracking) → all count as AI wins
+        n_ai_win     = s.get("n_ai_win", n_obs - n_player_win - n_tie)
         result[key] = {
-            "n_games":      n,
+            "n_games":      n_games,
+            "n_obs":        n_obs,
             "mean_gap":     round(mean, 2),
             "std_gap":      round(variance ** 0.5, 2),
             "n_player_win": n_player_win,
