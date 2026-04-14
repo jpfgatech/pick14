@@ -391,7 +391,7 @@ function renderStats(byPlayers) {
   table.className = "stats-table";
   const head = table.createTHead();
   const hr = head.insertRow();
-  ["Players", "Games", "Avg gap", "Std dev", "Note"].forEach((h) => {
+  ["Players", "Games", "W / T / L", "Win %", "Avg gap", "Std dev"].forEach((h) => {
     const th = document.createElement("th");
     th.textContent = h;
     hr.appendChild(th);
@@ -400,19 +400,23 @@ function renderStats(byPlayers) {
   for (const k of keys) {
     const s = byPlayers[k];
     const tr = body.insertRow();
-    const gap = s.mean_gap;
-    const note = gap > 1 ? "AI ahead" : gap < -1 ? "You ahead" : "Even";
-    const noteClass = gap > 1 ? "stats-note--bad" : gap < -1 ? "stats-note--good" : "";
+    const gap      = s.mean_gap;
+    const nw       = s.n_player_win ?? 0;
+    const nt       = s.n_tie        ?? 0;
+    const nl       = s.n_ai_win     ?? 0;
+    const winPct   = s.n_games > 0 ? ((nw / s.n_games) * 100).toFixed(1) : "—";
+    const winClass = nw > nl ? "stats-note--good" : nw < nl ? "stats-note--bad" : "";
     [
       `${k}p`,
       String(s.n_games),
+      `${nw}W / ${nt}T / ${nl}L`,
+      `${winPct}%`,
       `${gap >= 0 ? "+" : ""}${gap.toFixed(2)} pts`,
       `±${s.std_gap.toFixed(2)} pts`,
-      note,
     ].forEach((val, ci) => {
       const td = tr.insertCell();
       td.textContent = val;
-      if (ci === 4 && noteClass) td.className = noteClass;
+      if (ci === 2 && winClass) td.className = winClass;
     });
   }
   container.innerHTML = "";

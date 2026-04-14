@@ -46,7 +46,10 @@ from pick14.serialize import state_from_dict, state_to_dict
 DATA_DIR   = Path(__file__).resolve().parent.parent / "data"
 STATS_PATH = DATA_DIR / "stats.json"
 
-# In-memory stats: {str(n_players): {"n": int, "sum": float, "sum_sq": float}}
+# In-memory stats:
+# {str(n_players): {"n": int, "sum": float, "sum_sq": float,
+#                   "n_player_win": int, "n_tie": int, "n_ai_win": int}}
+# Older records that lack the win/tie/loss fields are treated as all AI wins.
 _stats: dict[str, dict] = {}
 
 
@@ -74,10 +77,18 @@ def _record_game(n_players: int, gap: float) -> None:
     """gap = mean(agent_scores) − player_score  (positive ⇒ AI wins)."""
     key = str(n_players)
     if key not in _stats:
-        _stats[key] = {"n": 0, "sum": 0.0, "sum_sq": 0.0}
-    _stats[key]["n"]      += 1
-    _stats[key]["sum"]    += gap
-    _stats[key]["sum_sq"] += gap * gap
+        _stats[key] = {"n": 0, "sum": 0.0, "sum_sq": 0.0,
+                       "n_player_win": 0, "n_tie": 0, "n_ai_win": 0}
+    s = _stats[key]
+    s["n"]      += 1
+    s["sum"]    += gap
+    s["sum_sq"] += gap * gap
+    if gap < 0:      # player beats mean-agent
+        s["n_player_win"] = s.get("n_player_win", 0) + 1
+    elif gap == 0:   # exact tie
+        s["n_tie"]        = s.get("n_tie", 0) + 1
+    else:            # AI wins
+        s["n_ai_win"]     = s.get("n_ai_win", 0) + 1
     _save_stats()
 
 
@@ -293,10 +304,17 @@ def get_stats():
             continue
         mean     = s["sum"] / n
         variance = max(0.0, s["sum_sq"] / n - mean * mean)
+        n_player_win = s.get("n_player_win", 0)
+        n_tie        = s.get("n_tie", 0)
+        # games recorded before win-tracking was added → count as AI wins
+        n_ai_win     = s.get("n_ai_win", n - n_player_win - n_tie)
         result[key] = {
-            "n_games":  n,
-            "mean_gap": round(mean, 2),
-            "std_gap":  round(variance ** 0.5, 2),
+            "n_games":      n,
+            "mean_gap":     round(mean, 2),
+            "std_gap":      round(variance ** 0.5, 2),
+            "n_player_win": n_player_win,
+            "n_tie":        n_tie,
+            "n_ai_win":     n_ai_win,
         }
     return {"by_players": result}
 
