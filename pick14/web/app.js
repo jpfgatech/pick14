@@ -8,6 +8,7 @@ const JOKER_RED = 0x1f0cf;
 const JOKER_BLACK = 0x1f0cf;
 
 let sessionId = null;
+let humanSeat = 0;   // seat index the human controls; updated from API on each new game
 const API_PREFIX = window.location.pathname.startsWith("/pick14") ? "/pick14" : "";
 
 let currentView = null;
@@ -131,9 +132,9 @@ function renderCardLists() {
   const view = currentView;
   if (!view) return;
   const state = view.state;
-  const hand = state.hands[0] || [];
+  const hand = state.hands[humanSeat] || [];
   const pub = state.public || [];
-  const active = view.current_player === 0 && !view.finished;
+  const active = view.current_player === humanSeat && !view.finished;
 
   const handList = document.getElementById("handList");
   handList.innerHTML = "";
@@ -176,7 +177,7 @@ function renderScores(state) {
     const li = document.createElement("li");
     const pts = totalScorePile(state.score_piles[i] || []);
     const [sets, rem] = setsAndPoints(pts);
-    const label = i === 0 ? "You" : `Player ${i}`;
+    const label = i === humanSeat ? `You (seat ${i})` : `AI (seat ${i})`;
     li.textContent = `${label}: ${pts} pts (${sets} sets + ${rem})`;
     ul.appendChild(li);
   }
@@ -190,10 +191,10 @@ function arraysEqual(a, b) {
 
 function selectedAction() {
   const view = currentView;
-  if (!view || view.current_player !== 0 || view.finished) return null;
+  if (!view || view.current_player !== humanSeat || view.finished) return null;
   const state = view.state;
   const legal = view.legal_moves || [];
-  const hand = state.hands[0] || [];
+  const hand = state.hands[humanSeat] || [];
   const pub = state.public || [];
   const handIdx = [...selectedHand].sort((a, b) => a - b);
 
@@ -261,6 +262,7 @@ async function submitSelectedAction() {
 
 function applyView(view) {
   currentView = view;
+  humanSeat   = view.human_seat ?? humanSeat;
   const st = view.state;
   document.getElementById("game").hidden = false;
   document.getElementById("finished").hidden = true;
@@ -280,13 +282,16 @@ function applyView(view) {
       const pts = totalScorePile(st.score_piles[i] || []);
       const [sets, rem] = setsAndPoints(pts);
       const li = document.createElement("li");
-      li.textContent = `${i === 0 ? "You" : `Player ${i}`}: ${pts} points (${sets} sets and ${rem} points)`;
+      const label = i === humanSeat ? `You (seat ${i})` : `AI (seat ${i})`;
+      li.textContent = `${label}: ${pts} points (${sets} sets and ${rem} points)`;
+      if (i === humanSeat) li.classList.add("final-you");
       fs.appendChild(li);
     }
+    refreshStats();
     return;
   }
 
-  if (view.current_player !== 0) {
+  if (view.current_player !== humanSeat) {
     setStatus("Waiting for bots…");
     pollUntilHuman();
     return;
@@ -299,7 +304,7 @@ function pollUntilHuman() {
   pollTimer = setInterval(async () => {
     try {
       const view = await api("GET", `${API_PREFIX}/sessions/${sid}`);
-      if (view.finished || view.current_player === 0) {
+      if (view.finished || view.current_player === humanSeat) {
         clearInterval(pollTimer);
         pollTimer = null;
         selectedHand.clear();
@@ -318,12 +323,15 @@ async function newGame() {
   const n = Math.min(8, Math.max(2, parseInt(document.getElementById("numPlayers").value, 10) || 2));
   document.getElementById("numPlayers").value = String(n);
   const seedRaw = document.getElementById("seed").value.trim();
+  const seatRaw = document.getElementById("humanSeatInput").value.trim();
   const body = { num_players: n };
   if (seedRaw !== "") body.seed = parseInt(seedRaw, 10);
+  if (seatRaw !== "") body.human_seat = Math.max(0, Math.min(n - 1, parseInt(seatRaw, 10)));
   setStatus("Starting…");
   try {
     const data = await api("POST", `${API_PREFIX}/sessions`, body);
     sessionId = data.session_id;
+    humanSeat = data.human_seat ?? 0;
     selectedHand.clear();
     selectedPublic = null;
     setStatus("");
@@ -350,7 +358,7 @@ async function regret() {
 async function refresh() {
   if (!sessionId) return;
   try {
-    const view = await api("GET", `/sessions/${sessionId}`);
+    const view = await api("GET", `${API_PREFIX}/sessions/${sessionId}`);
     selectedHand.clear();
     selectedPublic = null;
     applyView(view);
@@ -360,8 +368,60 @@ async function refresh() {
   }
 }
 
+// ── Stats panel ───────────────────────────────────────────────────────────────
+async function refreshStats() {
+  try {
+    const data = await api("GET", `${API_PREFIX}/stats`);
+    renderStats(data.by_players || {});
+  } catch {
+    // silently ignore if endpoint is unreachable
+  }
+}
+
+function renderStats(byPlayers) {
+  const container = document.getElementById("statsBody");
+  const keys = Object.keys(byPlayers).sort((a, b) => parseInt(a) - parseInt(b));
+  if (keys.length === 0) {
+    container.innerHTML = '<span class="stats-empty">No completed games yet.</span>';
+    return;
+  }
+  const table = document.createElement("table");
+  table.className = "stats-table";
+  const head = table.createTHead();
+  const hr = head.insertRow();
+  ["Players", "Games", "Avg gap", "Std dev", "Note"].forEach((h) => {
+    const th = document.createElement("th");
+    th.textContent = h;
+    hr.appendChild(th);
+  });
+  const body = table.createTBody();
+  for (const k of keys) {
+    const s = byPlayers[k];
+    const tr = body.insertRow();
+    const gap = s.mean_gap;
+    const note = gap > 1 ? "AI ahead" : gap < -1 ? "You ahead" : "Even";
+    const noteClass = gap > 1 ? "stats-note--bad" : gap < -1 ? "stats-note--good" : "";
+    [
+      `${k}p`,
+      String(s.n_games),
+      `${gap >= 0 ? "+" : ""}${gap.toFixed(2)} pts`,
+      `±${s.std_gap.toFixed(2)} pts`,
+      note,
+    ].forEach((val, ci) => {
+      const td = tr.insertCell();
+      td.textContent = val;
+      if (ci === 4 && noteClass) td.className = noteClass;
+    });
+  }
+  container.innerHTML = "";
+  container.appendChild(table);
+}
+
 document.getElementById("btnNew").addEventListener("click", newGame);
 document.getElementById("btnAgain").addEventListener("click", newGame);
 document.getElementById("btnRegret").addEventListener("click", regret);
 document.getElementById("btnRefresh").addEventListener("click", refresh);
 document.getElementById("btnConfirmAction").addEventListener("click", submitSelectedAction);
+
+// Load stats immediately on page open
+refreshStats();

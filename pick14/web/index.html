@@ -20,6 +20,10 @@
           <input id="numPlayers" type="number" min="2" max="8" value="2" inputmode="numeric" />
         </div>
         <div class="field-row">
+          <label for="humanSeatInput">Your seat <span class="hint">(optional)</span></label>
+          <input id="humanSeatInput" type="number" min="0" max="7" inputmode="numeric" placeholder="random" />
+        </div>
+        <div class="field-row">
           <label for="seed">Seed <span class="hint">(optional)</span></label>
           <input id="seed" type="number" inputmode="numeric" placeholder="random" />
         </div>
@@ -67,6 +71,13 @@
         <h2>Game over</h2>
         <ul id="finalScores"></ul>
         <button type="button" class="btn btn--primary" id="btnAgain">Play again</button>
+      </section>
+
+      <!-- Stats panel: always visible, refreshed on load and after each game -->
+      <section class="panel panel--stats" id="statsPanel" aria-label="Statistics">
+        <h2 class="stats-title">AI vs Player statistics</h2>
+        <p class="stats-sub">Gap = avg AI score − your score (positive: AI wins)</p>
+        <div id="statsBody"><span class="stats-empty">No completed games yet.</span></div>
       </section>
     </div>
     <script src="assets/app.js" defer></script>

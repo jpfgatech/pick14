@@ -378,3 +378,72 @@ body {
 .err {
   color: var(--danger);
 }
+
+/* ── Stats panel ──────────────────────────────────────────────────────────── */
+.panel--stats {
+  margin-top: 1.5rem;
+}
+
+.stats-title {
+  margin: 0 0 0.2rem;
+  font-size: 0.9rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.stats-sub {
+  margin: 0 0 0.75rem;
+  font-size: 0.82em;
+  color: var(--muted);
+}
+
+.stats-empty {
+  color: var(--muted);
+  font-size: 0.9em;
+}
+
+.stats-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88em;
+}
+
+.stats-table th,
+.stats-table td {
+  padding: 0.4rem 0.6rem;
+  text-align: right;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.stats-table th:first-child,
+.stats-table td:first-child {
+  text-align: left;
+}
+
+.stats-table th {
+  color: var(--muted);
+  font-weight: 500;
+  font-size: 0.82em;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.stats-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.stats-note--good {
+  color: #5cb85c;
+  font-weight: 600;
+}
+
+.stats-note--bad {
+  color: var(--danger);
+}
+
+.final-you {
+  font-weight: 700;
+  color: var(--accent);
+}
