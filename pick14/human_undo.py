@@ -12,16 +12,17 @@ class HumanSegmentUndo:
     Checkpoints for earlier segments are kept on ``segments_stack`` (newest last).
     """
 
+    human_seat: int = 0
     segments_stack: list[GameState] = field(default_factory=list)
     segment_base: GameState | None = None
     dirty: bool = False
 
     def on_human_turn_begin(self, state: GameState) -> None:
-        """Call when it is seat 0's turn and the UI is about to prompt.
+        """Call when it is the human seat's turn and the UI is about to prompt.
 
         Forced-play continuation (``must_play_only``) keeps the existing ``segment_base``.
         """
-        if state.current_player != 0:
+        if state.current_player != self.human_seat:
             return
         if state.must_play_only:
             return
@@ -36,11 +37,10 @@ class HumanSegmentUndo:
             self.segment_base = None
             self.dirty = False
 
-    @staticmethod
-    def _segment_finished(state: GameState) -> bool:
+    def _segment_finished(self, state: GameState) -> bool:
         if is_finished(state):
             return True
-        return state.current_player != 0
+        return state.current_player != self.human_seat
 
     def regret(self) -> tuple[GameState | None, int]:
         """Return ``(new_state, remaining_completed_segments)`` or ``(None, n)``."""

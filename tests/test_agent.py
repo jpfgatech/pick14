@@ -1,4 +1,8 @@
-from pick14.agent import choose_dummy_action, greedy_match_move, stingy_play_move
+from pick14.agent import (
+    choose_dummy_action,
+    gfp_max_hand_before_pub_match,
+    v4_play_move,
+)
 from pick14.cards import Card, Rank, Suit
 from pick14.engine import GameState, Random
 
@@ -28,7 +32,7 @@ def _state(
     )
 
 
-def test_greedy_prefers_higher_capture_points():
+def test_gfp_match_prefers_higher_hand_game_value_then_capture():
     pub = _c(Rank.SEVEN, Suit.HEART)
     low = _c(Rank.ACE, Suit.CLUB)
     high = _c(Rank.SIX, Suit.HEART)
@@ -38,18 +42,18 @@ def test_greedy_prefers_higher_capture_points():
         public=[pub],
         deck=[],
     )
-    m = greedy_match_move(g)
+    m = gfp_max_hand_before_pub_match(g)
     assert m is not None
     assert set(m.hand_indices) == {0, 1}
 
 
-def test_stingy_plays_lowest_score_value_card():
+def test_v4_play_respects_genome_ordering():
     g = _state(
         hands=[[_c(Rank.TEN, Suit.HEART), _c(Rank.TEN, Suit.CLUB)]],
         public=[_c(Rank.ACE, Suit.DIAMOND)],
         deck=[],
     )
-    p = stingy_play_move(g)
+    p = v4_play_move(g)
     assert p.hand_index == 1
 
 
@@ -60,10 +64,10 @@ def test_dummy_plays_when_no_match():
         deck=[],
     )
     mv = choose_dummy_action(g)
-    assert mv == stingy_play_move(g)
+    assert mv == v4_play_move(g)
 
 
-def test_dummy_uses_forced_stingy_play():
+def test_dummy_forced_play_uses_v4():
     g = _state(
         hands=[[_c(Rank.TEN, Suit.HEART), _c(Rank.TWO, Suit.CLUB)]],
         public=[],
@@ -71,4 +75,4 @@ def test_dummy_uses_forced_stingy_play():
         must_play_only=True,
     )
     mv = choose_dummy_action(g)
-    assert mv.hand_index == 1
+    assert mv.hand_index == 0

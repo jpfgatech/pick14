@@ -16,5 +16,7 @@ htmlcov/
 .venv/
 venv/
 
-# Regenerated training outputs (keep artifacts/README.md)
+# Regenerated training outputs / local dumps
 artifacts/*/
+
+scratch/

@@ -225,7 +225,7 @@ def create_session(body: NewSessionIn):
     else:
         seat = Random().randint(0, n - 1)
 
-    sess = TableSession(st, HumanSegmentUndo(), seat)
+    sess = TableSession(st, HumanSegmentUndo(human_seat=seat), seat)
     SESSIONS[sid] = sess
     _run_bots(sess)      # advance bots if human doesn't hold seat 0
     return {"session_id": sid, **_view(st, seat)}
@@ -246,9 +246,9 @@ def replace_state(session_id: str, body: StateReplaceIn):
     human_seat = SESSIONS[session_id].human_seat if session_id in SESSIONS else 0
     if session_id in SESSIONS:
         SESSIONS[session_id].state = st
-        SESSIONS[session_id].undo  = HumanSegmentUndo()
+        SESSIONS[session_id].undo  = HumanSegmentUndo(human_seat=human_seat)
     else:
-        SESSIONS[session_id] = TableSession(st, HumanSegmentUndo(), human_seat)
+        SESSIONS[session_id] = TableSession(st, HumanSegmentUndo(human_seat=human_seat), human_seat)
     return _view(st, human_seat)
 
 
