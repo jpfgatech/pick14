@@ -141,6 +141,7 @@ def simulate_game(
                         "rounds":   (match_tick - tick_in) / n_players,
                         "digit":    dg,
                         "sv":       sv,
+                        "cid":      cid,
                         "matched":  True,
                     })
                 apply_move(state, mm)
@@ -164,6 +165,7 @@ def simulate_game(
             "rounds":  (match_tick - tick_in) / n_players,
             "digit":   dg,
             "sv":      sv,
+            "cid":     cid,
             "matched": False,
         })
 
@@ -181,6 +183,7 @@ class Stats:
         self.lc_matched:   list[float] = []      # lifecycle_rounds, matched only
         self.lc_unmatched: list[float] = []
         self.lc_by_digit_matched: defaultdict[int, list[float]] = defaultdict(list)
+        self.lc_by_cid_matched:   defaultdict[int, list[float]] = defaultdict(list)
         # availability: count(present) and count(total) per digit
         self.avail_present: defaultdict[int, int] = defaultdict(int)
         self.avail_total:   defaultdict[int, int] = defaultdict(int)
@@ -198,6 +201,7 @@ class Stats:
             if r["matched"]:
                 self.lc_matched.append(r["rounds"])
                 self.lc_by_digit_matched[r["digit"]].append(r["rounds"])
+                self.lc_by_cid_matched[r["cid"]].append(r["rounds"])
             else:
                 self.lc_unmatched.append(r["rounds"])
 
@@ -366,6 +370,91 @@ def plot_availability_ploss(results: dict[int, Stats], out_dir: Path) -> None:
     print(f"  Saved → {out}")
 
 
+# ── Per-card lifecycle plot (13-row figure) ───────────────────────────────────
+
+_SUIT_COLOR = {
+    Suit.CLUB:    "#2ca02c",   # green
+    Suit.DIAMOND: "#ff7f0e",   # orange
+    Suit.SPADE:   "#1f77b4",   # blue
+    Suit.HEART:   "#d62728",   # red
+}
+_JOKER_COLOR = {"RJ": "#e7ba52", "BJ": "#7b4173"}   # gold / purple
+
+
+def plot_lifecycle_by_card(results: dict[int, Stats], out_dir: Path) -> None:
+    """
+    13-row figure: lifecycle distribution (matched cards only) for each of the
+    54 cards, grouped by digit row, with a shared aligned x-axis.
+    One PNG per player count.
+    """
+    for np_, st in sorted(results.items()):
+        if not st.lc_matched:
+            continue
+
+        x_max = float(np.percentile(st.lc_matched, 99))
+        bins  = np.linspace(0, x_max, 41)   # 40 bins, aligned across all rows
+
+        fig, axes = plt.subplots(13, 1, figsize=(14, 26), sharex=True)
+        fig.subplots_adjust(hspace=0.08, left=0.10, right=0.97, top=0.95, bottom=0.04)
+
+        for row, dg in enumerate(DIGITS):
+            ax = axes[row]
+
+            # All 54 canonical cards that have this game_value, sorted by score_value
+            cards_in_digit = sorted(
+                [(cid, CANONICAL_DECK_ORDER[cid])
+                 for cid in range(54)
+                 if game_value(CANONICAL_DECK_ORDER[cid]) == dg],
+                key=lambda t: score_value(t[1]),
+            )
+
+            any_data = False
+            for cid, c in cards_in_digit:
+                data = st.lc_by_cid_matched.get(cid, [])
+                if not data:
+                    continue
+                any_data = True
+                lbl   = card_label(cid)
+                color = _JOKER_COLOR["RJ" if c.joker_red else "BJ"] \
+                        if c.is_joker else _SUIT_COLOR[c.suit]
+                # filled area (faint)
+                ax.hist(data, bins=bins, density=True,
+                        histtype="stepfilled", color=color, alpha=0.18)
+                # outline
+                ax.hist(data, bins=bins, density=True,
+                        histtype="step", color=color, lw=1.4, label=lbl)
+
+            dg_lbl = RANK_LABEL.get(dg, str(dg))
+            # Digit label as left-side annotation
+            ax.text(-0.06, 0.5, dg_lbl,
+                    transform=ax.transAxes, ha="center", va="center",
+                    fontsize=10, fontweight="bold")
+
+            if any_data:
+                ax.legend(fontsize=6.5, loc="upper right",
+                          ncol=len(cards_in_digit), framealpha=0.7,
+                          handlelength=1.2, columnspacing=0.7)
+            ax.tick_params(labelleft=False, left=False)
+            ax.yaxis.set_visible(False)
+            ax.grid(True, alpha=0.2, axis="x")
+            for spine in ("top", "right", "left"):
+                ax.spines[spine].set_visible(False)
+
+        axes[-1].set_xlabel("Lifecycle (rounds)", fontsize=10)
+        axes[-1].tick_params(labelbottom=True)
+
+        fig.suptitle(
+            f"Lifecycle distribution per card — {np_}-player\n"
+            f"(GFP match + caution play, matched cards only, x-axis aligned)",
+            fontsize=11, fontweight="bold", y=0.97,
+        )
+
+        out = out_dir / f"lifecycle_by_card_{np_}p.png"
+        fig.savefig(out, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        print(f"  Saved → {out}")
+
+
 # ── Logging / expectations ────────────────────────────────────────────────────
 
 def write_log(results: dict[int, Stats], out_dir: Path, n_games: int) -> None:
@@ -477,6 +566,7 @@ def main() -> None:
     print("\nPlotting …")
     plot_lifecycle(results, args.out_dir)
     plot_availability_ploss(results, args.out_dir)
+    plot_lifecycle_by_card(results, args.out_dir)
     write_log(results, args.out_dir, args.games)
 
 
