@@ -21,6 +21,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -561,6 +562,14 @@ def write_log(results: dict[int, Stats], out_dir: Path, n_games: int) -> None:
     log_path = out_dir / "log.txt"
     log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(f"  Log  → {log_path}")
+
+    # Save per-digit Ploss values as JSON for downstream strategy scripts
+    for np_, st in results.items():
+        ploss_dict = {str(dg): st.ploss_prob(dg) for dg in DIGITS}
+        json_path = out_dir / f"ploss_{np_}p.json"
+        json_path.write_text(json.dumps(ploss_dict, indent=2), encoding="utf-8")
+        print(f"  Ploss → {json_path}")
+
     # Also print to stdout
     print()
     for ln in lines:
