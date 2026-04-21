@@ -381,26 +381,53 @@ _SUIT_COLOR = {
 _JOKER_COLOR = {"RJ": "#e7ba52", "BJ": "#7b4173"}   # gold / purple
 
 
+def _gaussian_kde(data: np.ndarray, x_grid: np.ndarray) -> np.ndarray:
+    """Gaussian KDE with Silverman bandwidth (no scipy dependency)."""
+    n = len(data)
+    if n < 2:
+        return np.zeros_like(x_grid)
+    std = data.std()
+    bw = 1.06 * std * n ** (-0.2) if std > 0 else 0.1
+    # shape (grid_pts, n_samples) — vectorised
+    diff = (x_grid[:, None] - data[None, :]) / bw
+    return np.exp(-0.5 * diff ** 2).sum(axis=1) / (n * bw * np.sqrt(2 * np.pi))
+
+
 def plot_lifecycle_by_card(results: dict[int, Stats], out_dir: Path) -> None:
     """
-    13-row figure: lifecycle distribution (matched cards only) for each of the
-    54 cards, grouped by digit row, with a shared aligned x-axis.
+    13-row figure: KDE curves of lifecycle (matched cards only) for each of the
+    54 cards, grouped by digit row.  Both x- and y-axes are aligned across all
+    rows (sharex + sharey), giving a true density-comparable view.
     One PNG per player count.
     """
     for np_, st in sorted(results.items()):
         if not st.lc_matched:
             continue
 
-        x_max = float(np.percentile(st.lc_matched, 99))
-        bins  = np.linspace(0, x_max, 41)   # 40 bins, aligned across all rows
+        x_max   = float(np.percentile(st.lc_matched, 99))
+        x_grid  = np.linspace(0, x_max, 400)
 
-        fig, axes = plt.subplots(13, 1, figsize=(14, 26), sharex=True)
-        fig.subplots_adjust(hspace=0.08, left=0.10, right=0.97, top=0.95, bottom=0.04)
+        # Pre-compute all KDE curves to find the global y maximum
+        kde_cache: dict[int, np.ndarray] = {}
+        for cid in range(54):
+            data = np.array(st.lc_by_cid_matched.get(cid, []))
+            if len(data) >= 2:
+                kde_cache[cid] = _gaussian_kde(data, x_grid)
+
+        global_y_max = max(
+            (y.max() for y in kde_cache.values()), default=1.0
+        )
+
+        fig, axes = plt.subplots(
+            13, 1, figsize=(14, 26),
+            sharex=True, sharey=True,
+        )
+        fig.subplots_adjust(hspace=0.06, left=0.10, right=0.97, top=0.95, bottom=0.04)
 
         for row, dg in enumerate(DIGITS):
             ax = axes[row]
 
-            # All 54 canonical cards that have this game_value, sorted by score_value
+            # Cards of this digit, sorted by score_value (low → high)
             cards_in_digit = sorted(
                 [(cid, CANONICAL_DECK_ORDER[cid])
                  for cid in range(54)
@@ -410,22 +437,18 @@ def plot_lifecycle_by_card(results: dict[int, Stats], out_dir: Path) -> None:
 
             any_data = False
             for cid, c in cards_in_digit:
-                data = st.lc_by_cid_matched.get(cid, [])
-                if not data:
+                y = kde_cache.get(cid)
+                if y is None:
                     continue
                 any_data = True
                 lbl   = card_label(cid)
-                color = _JOKER_COLOR["RJ" if c.joker_red else "BJ"] \
-                        if c.is_joker else _SUIT_COLOR[c.suit]
-                # filled area (faint)
-                ax.hist(data, bins=bins, density=True,
-                        histtype="stepfilled", color=color, alpha=0.18)
-                # outline
-                ax.hist(data, bins=bins, density=True,
-                        histtype="step", color=color, lw=1.4, label=lbl)
+                color = (_JOKER_COLOR["RJ" if c.joker_red else "BJ"]
+                         if c.is_joker else _SUIT_COLOR[c.suit])
+                ax.fill_between(x_grid, y, alpha=0.15, color=color)
+                ax.plot(x_grid, y, color=color, lw=1.5, label=lbl)
 
+            # Digit label left of row
             dg_lbl = RANK_LABEL.get(dg, str(dg))
-            # Digit label as left-side annotation
             ax.text(-0.06, 0.5, dg_lbl,
                     transform=ax.transAxes, ha="center", va="center",
                     fontsize=10, fontweight="bold")
@@ -434,6 +457,8 @@ def plot_lifecycle_by_card(results: dict[int, Stats], out_dir: Path) -> None:
                 ax.legend(fontsize=6.5, loc="upper right",
                           ncol=len(cards_in_digit), framealpha=0.7,
                           handlelength=1.2, columnspacing=0.7)
+
+            ax.set_ylim(0, global_y_max * 1.05)
             ax.tick_params(labelleft=False, left=False)
             ax.yaxis.set_visible(False)
             ax.grid(True, alpha=0.2, axis="x")
@@ -444,8 +469,8 @@ def plot_lifecycle_by_card(results: dict[int, Stats], out_dir: Path) -> None:
         axes[-1].tick_params(labelbottom=True)
 
         fig.suptitle(
-            f"Lifecycle distribution per card — {np_}-player\n"
-            f"(GFP match + caution play, matched cards only, x-axis aligned)",
+            f"Lifecycle KDE per card — {np_}-player\n"
+            f"(GFP match + caution play, matched cards only, x- and y-axes aligned)",
             fontsize=11, fontweight="bold", y=0.97,
         )
 
