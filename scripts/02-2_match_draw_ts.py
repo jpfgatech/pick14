@@ -2,23 +2,22 @@
 """
 Match-draw time-series model — instruction 02-2.
 
-Fits a Linear Probability Model to explain how past extra-draw events
-increase the probability of a future match:
+Fits a Linear Probability Model:
 
-  Match[n] = Base + β1·Draw[n-1] + β2·Draw[n-2] + β3·Draw[n-3]
-
-where Match[n] / Draw[n] are 0/1 indicators on each player's own turn sequence.
+  3-lag:  Match[n] = Base + β1·Draw[n-1] + β2·Draw[n-2] + β3·Draw[n-3]
+  2-lag:  Match[n] = Base + β1·Draw[n-1] + β2·Draw[n-2]
 
 Two game variants are compared:
   original  — Draw[n] = Match[n]  (extra draw only follows a real match)
   fake-draw — Draw[n] = Match[n] ∨ pseudo-match[n]  (half of forced passes get
               a fake draw+play event, injecting independent Draw variation)
 
-Both variants use GFP match + caution play and NO score penalty.
+Sanity check:  Base + Base·β1 + Base·β1·β2 ≈ match ratio (empirical)
 
 Outputs  artifacts/02-2/
-  beta_bars.png   β1/β2/β3 bars ± 95 % CI for all 6 conditions
-  log.txt         full coefficient table, expectations check
+  beta_3lag.png   Base + β1/β2/β3 bars for original and fake-draw × {2,3,4}p
+  beta_2lag.png   Base + β1/β2 bars  (same layout, 2-lag model)
+  log.txt         coefficient tables, expectations check
 
 Usage:
   python scripts/02-2_match_draw_ts.py [--games N] [--seed S]
@@ -46,7 +45,7 @@ from pick14.rl.sim_core import (
     skip_empty_hands,
 )
 
-# ── Pseudo-match (re-used from 02-1) ─────────────────────────────────────────
+# ── Pseudo-match helper ───────────────────────────────────────────────────────
 
 def apply_pseudo_match(state: RlPick14State, rng: Random) -> bool:
     """Dump 1 random hand card (out of game), draw 2, set phase=PLAY.
@@ -74,13 +73,7 @@ def simulate_game(
     rng_int: Random,
     fake_draw: bool,
 ) -> tuple[list[list[int]], list[list[int]]]:
-    """Return (match_seqs, draw_seqs) — one binary sequence per player.
-
-    match_seqs[p][n] = 1 if player p matched on their n-th MATCH turn.
-    draw_seqs[p][n]  = 1 if an extra draw followed that turn.
-      original:   draw[n] = match[n]
-      fake-draw:  draw[n] = match[n] OR pseudo-match on forced pass (p=0.5)
-    """
+    """Return (match_seqs, draw_seqs): one binary list per player per MATCH turn."""
     rng = Random(seed)
     state = new_game(n_players, n_hand=n_hand, rng=rng)
 
@@ -103,17 +96,14 @@ def simulate_game(
 
             if mm is not None:
                 match_seqs[p].append(1)
-                draw_seqs[p].append(1)        # real match → extra draw
+                draw_seqs[p].append(1)
                 apply_move(state, mm)
             else:
-                # Forced pass
                 got_pseudo = False
                 if is_candidate[p] and state.hands[p] and rng_int.random() < 0.5:
                     got_pseudo = apply_pseudo_match(state, rng_int)
-
                 match_seqs[p].append(0)
                 draw_seqs[p].append(1 if got_pseudo else 0)
-
                 if not got_pseudo:
                     apply_move(state, PassMatch())
 
@@ -130,34 +120,30 @@ def run_batch(
     base_seed: int,
     fake_draw: bool,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Run n_games and return (X, y) for the LPM regression.
-
-    Each row:  [1, Draw[n-1], Draw[n-2], Draw[n-3], Match[n]]
+    """Collect (X_3lag, y) arrays from all games.
+    X columns: [1, Draw[n-1], Draw[n-2], Draw[n-3]]
+    y: Match[n]
     """
     rng_int = Random(base_seed ^ (0xFADE if fake_draw else 0xBEEF))
-    X_all, y_all = [], []
+    X_rows, y_rows = [], []
 
     for i in range(n_games):
         m_seqs, d_seqs = simulate_game(n_players, n_hand, base_seed + i, rng_int, fake_draw)
         for p in range(n_players):
-            ms = m_seqs[p]
-            ds = d_seqs[p]
+            ms, ds = m_seqs[p], d_seqs[p]
             T = len(ms)
-            padded_d = [0, 0, 0] + ds          # pre-pad draw with 3 zeros
+            padded_d = [0, 0, 0] + ds
             for n in range(T):
-                lag1 = padded_d[n + 2]          # Draw[n-1]
-                lag2 = padded_d[n + 1]          # Draw[n-2]
-                lag3 = padded_d[n + 0]          # Draw[n-3]
-                X_all.append([1.0, lag1, lag2, lag3])
-                y_all.append(float(ms[n]))
+                X_rows.append([1.0, padded_d[n+2], padded_d[n+1], padded_d[n]])
+                y_rows.append(float(ms[n]))
 
-    return np.array(X_all), np.array(y_all)
+    return np.array(X_rows), np.array(y_rows)
 
 
 # ── OLS ───────────────────────────────────────────────────────────────────────
 
 def ols_lpm(X: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray, float, float]:
-    """LPM OLS.  Returns (coeffs[4], se[4], R², RMSE)."""
+    """LPM OLS.  Returns (coeffs, se, R², RMSE)."""
     n, k = X.shape
     coeffs, *_ = np.linalg.lstsq(X, y, rcond=None)
     y_pred = X @ coeffs
@@ -181,58 +167,78 @@ _COLORS_ORIG = {2: "#4c8cbf", 3: "#7abf7a", 4: "#e07b39"}
 _COLORS_FAKE = {2: "#a0c8e8", 3: "#b8ddb8", 4: "#f0b898"}
 
 
-def plot_beta_bars(
-    results: dict,   # (variant, n_players) -> (coeffs, se, r2, rmse)
+def _bar_panel(
+    ax: plt.Axes,
+    coeffs: np.ndarray,
+    se: np.ndarray,
+    ratio: float,
+    n_lags: int,
+    variant: str,
+    np_: int,
+    r2: float,
+) -> None:
+    ci = 1.96
+    colors = _COLORS_ORIG if variant == "original" else _COLORS_FAKE
+    color = colors[np_]
+
+    # bars: Base, β1, β2[, β3]
+    labels = ["Base"] + [f"β{i}" for i in range(1, n_lags + 1)]
+    vals   = coeffs[:n_lags + 1]
+    errs   = ci * se[:n_lags + 1]
+
+    x = np.arange(len(labels))
+    bars = ax.bar(x, vals, 0.6, color=color, edgecolor="white",
+                  yerr=errs, capsize=4, error_kw={"elinewidth": 1.1})
+    ax.axhline(0, color="black", lw=0.6)
+
+    for bar, v, e in zip(bars, vals, errs):
+        ypos = max(v + e, 0) + 0.008
+        ax.text(bar.get_x() + bar.get_width() / 2, ypos,
+                f"{v:.3f}", ha="center", va="bottom", fontsize=7)
+
+    base, b1 = coeffs[0], coeffs[1]
+    b2 = coeffs[2] if n_lags >= 2 else 0.0
+    approx = base + base * b1 + base * b1 * b2
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, fontsize=8)
+    ax.set_title(
+        f"{variant}  {np_}p   ratio={ratio:.3f}\n"
+        f"B+B·β1+B·β1·β2={approx:.3f}   R²={r2:.4f}",
+        fontsize=7.5,
+    )
+
+
+def plot_beta_grid(
+    results: dict,   # (variant, n_players) -> (coeffs, se, r2, rmse, ratio)
+    n_lags: int,
     out_path: Path,
 ) -> None:
-    """β1, β2, β3 bar chart: 2 rows (orig / fake) × 3 cols (player counts)."""
-    fig, axes = plt.subplots(2, 3, figsize=(13, 6), sharey=True)
+    fig, axes = plt.subplots(2, 3, figsize=(13, 6), sharey=False)
     fig.suptitle(
-        "Match-draw time-series: β1, β2, β3 with 95% CI\n"
-        "Match[n] = Base + β1·Draw[n-1] + β2·Draw[n-2] + β3·Draw[n-3]",
-        fontsize=10,
+        f"{n_lags}-lag LPM:  Match[n] = Base"
+        + "".join(f" + β{i}·Draw[n-{i}]" for i in range(1, n_lags + 1))
+        + "\n(GFP match + caution play,  bars = coeff ± 95% CI)",
+        fontsize=9,
     )
-    ci = 1.96
-    beta_labels = ["β1 (lag 1)", "β2 (lag 2)", "β3 (lag 3)"]
-    x = np.arange(3)
-    width = 0.55
-
     for row, variant in enumerate(["original", "fake-draw"]):
-        colors = _COLORS_ORIG if variant == "original" else _COLORS_FAKE
         for col, np_ in enumerate(_PLAYER_COUNTS):
-            ax = axes[row][col]
-            coeffs, se, r2, rmse = results[(variant, np_)]
-            betas = coeffs[1:]          # skip intercept
-            errs  = ci * se[1:]
-            color = colors[np_]
-            bars = ax.bar(x, betas, width, color=color, edgecolor="white",
-                          yerr=errs, capsize=5,
-                          error_kw={"elinewidth": 1.2})
-            ax.axhline(0, color="black", lw=0.7)
-            for bar, v, e in zip(bars, betas, errs):
-                ax.text(
-                    bar.get_x() + bar.get_width() / 2,
-                    max(v + e, 0) + 0.003,
-                    f"{v:.3f}",
-                    ha="center", va="bottom", fontsize=7.5,
-                )
-            title = f"{variant}  {np_}p\nBase={coeffs[0]:.3f}  R²={r2:.4f}"
-            ax.set_title(title, fontsize=8)
-            ax.set_xticks(x)
-            ax.set_xticklabels(beta_labels, fontsize=7)
+            coeffs, se, r2, rmse, ratio = results[(variant, np_)]
+            _bar_panel(axes[row][col], coeffs, se, ratio, n_lags, variant, np_, r2)
             if col == 0:
-                ax.set_ylabel("Δ P(match)")
+                axes[row][col].set_ylabel("probability")
 
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
-    print(f"  Bars → {out_path}")
+    print(f"  Plot ({n_lags}-lag) → {out_path}")
 
 
 # ── Log ───────────────────────────────────────────────────────────────────────
 
 def write_log(
-    results: dict,
+    results_3: dict,
+    results_2: dict,
     out_path: Path,
     n_games: int,
     n_hand: int,
@@ -241,64 +247,75 @@ def write_log(
     lines: list[str] = [
         "=== Match-draw time-series LPM (instruction 02-2) ===",
         f"Games/config : {n_games} × {{2,3,4}}p   n_hand={n_hand}",
-        "Model        : Match[n] = Base + β1·Draw[n-1] + β2·Draw[n-2] + β3·Draw[n-3]",
         "",
     ]
 
-    for variant in ["original", "fake-draw"]:
-        lines.append(f"--- {variant} ---")
-        hdr = f"  {'Players':<8}  {'Base':>10}  {'β1 (lag1)':>16}  {'β2 (lag2)':>16}  {'β3 (lag3)':>16}  {'R²':>7}  {'RMSE':>7}"
-        lines.append(hdr)
-        for np_ in _PLAYER_COUNTS:
-            coeffs, se, r2, rmse = results[(variant, np_)]
-            base = coeffs[0]
-            def fmt(v, s): return f"{v:+.4f} ±{ci*s:.4f}"
-            lines.append(
-                f"  {np_}p{'':<6}  {base:>+10.4f}  "
-                f"{fmt(coeffs[1], se[1]):>16}  "
-                f"{fmt(coeffs[2], se[2]):>16}  "
-                f"{fmt(coeffs[3], se[3]):>16}  "
-                f"{r2:>7.4f}  {rmse:>7.4f}"
-            )
+    for n_lags, results in [(3, results_3), (2, results_2)]:
+        model_str = "Base + β1·Draw[n-1] + β2·Draw[n-2]" + (" + β3·Draw[n-3]" if n_lags == 3 else "")
+        lines.append(f"--- {n_lags}-lag model:  {model_str} ---")
+        for variant in ["original", "fake-draw"]:
+            lines.append(f"  [{variant}]")
+            hdr = f"    {'np':<4}  {'ratio':>6}  {'approx':>7}  {'Base':>10}  {'β1':>12}  {'β2':>12}"
+            if n_lags == 3:
+                hdr += f"  {'β3':>12}"
+            hdr += f"  {'R²':>7}"
+            lines.append(hdr)
+            for np_ in _PLAYER_COUNTS:
+                coeffs, se, r2, _, ratio = results[(variant, np_)]
+                base, b1, b2 = coeffs[0], coeffs[1], coeffs[2]
+                b3 = coeffs[3] if n_lags == 3 else None
+                approx = base + base * b1 + base * b1 * b2
+                def fmt(v, s): return f"{v:+.4f}±{ci*s:.4f}"
+                row = f"    {np_}p    {ratio:.4f}  {approx:.4f}  {base:>+10.4f}  {fmt(b1,se[1]):>12}  {fmt(b2,se[2]):>12}"
+                if n_lags == 3:
+                    row += f"  {fmt(b3,se[3]):>12}"
+                row += f"  {r2:.4f}"
+                lines.append(row)
         lines.append("")
 
     lines.append("=== Expectations check ===")
     lines.append("")
 
-    # 1. All β > 0 and decaying
+    # 1. β1, β2 consistent between 3-lag and 2-lag
+    lines.append("1. β1 and β2 stability when removing β3:")
     for variant in ["original", "fake-draw"]:
         for np_ in _PLAYER_COUNTS:
-            coeffs, se, *_ = results[(variant, np_)]
-            b1, b2, b3 = coeffs[1], coeffs[2], coeffs[3]
-            all_pos  = b1 > 0 and b2 > 0 and b3 > 0
-            decaying = b1 >= b2 >= b3
+            b1_3 = results_3[(variant, np_)][0][1]
+            b2_3 = results_3[(variant, np_)][0][2]
+            b1_2 = results_2[(variant, np_)][0][1]
+            b2_2 = results_2[(variant, np_)][0][2]
+            d1, d2 = abs(b1_3 - b1_2), abs(b2_3 - b2_2)
+            stable = d1 < 0.01 and d2 < 0.02
             lines.append(
-                f"1. {variant} {np_}p  β1={b1:.4f}  β2={b2:.4f}  β3={b3:.4f}  "
-                + ("PASS: all>0" if all_pos else "NOTE: some ≤0")
-                + ("  decaying" if decaying else "  not-decaying")
+                f"   {variant} {np_}p  Δβ1={d1:.4f}  Δβ2={d2:.4f}  "
+                + ("PASS" if stable else "NOTE: larger shift")
             )
     lines.append("")
 
-    # 2. orig vs fake-draw agreement (β1 within 0.05 of each other)
-    lines.append("2. orig vs fake-draw β1 agreement:")
-    for np_ in _PLAYER_COUNTS:
-        b1_orig = results[("original", np_)][0][1]
-        b1_fake = results[("fake-draw", np_)][0][1]
-        diff = abs(b1_orig - b1_fake)
-        lines.append(
-            f"   {np_}p  orig β1={b1_orig:.4f}  fake β1={b1_fake:.4f}  diff={diff:.4f}  "
-            + ("PASS" if diff < 0.05 else "NOTE: larger gap")
-        )
+    # 2. approx vs ratio
+    lines.append("2. Base + Base·β1 + Base·β1·β2 vs empirical ratio (2-lag model):")
+    for variant in ["original", "fake-draw"]:
+        for np_ in _PLAYER_COUNTS:
+            coeffs, _, _, _, ratio = results_2[(variant, np_)]
+            base, b1, b2 = coeffs[0], coeffs[1], coeffs[2]
+            approx = base + base * b1 + base * b1 * b2
+            err = abs(approx - ratio)
+            lines.append(
+                f"   {variant} {np_}p  approx={approx:.4f}  ratio={ratio:.4f}  "
+                f"diff={err:.4f}  " + ("PASS" if err < 0.05 else "NOTE")
+            )
     lines.append("")
 
-    # 3. Consistency across player counts
-    for variant in ["original", "fake-draw"]:
-        b1s = [results[(variant, np_)][0][1] for np_ in _PLAYER_COUNTS]
-        rng = max(b1s) - min(b1s)
-        lines.append(
-            f"3. {variant}  β1 range: {min(b1s):.4f}–{max(b1s):.4f}  "
-            + ("PASS: consistent" if rng < 0.05 else "NOTE: spread > 0.05")
-        )
+    # 3. β1 positive and large across all conditions
+    lines.append("3. β1 > 0 in all conditions:")
+    all_pass = True
+    for n_lags, results in [(3, results_3), (2, results_2)]:
+        for variant in ["original", "fake-draw"]:
+            for np_ in _PLAYER_COUNTS:
+                b1 = results[(variant, np_)][0][1]
+                if b1 <= 0:
+                    all_pass = False
+    lines.append(f"   → {'PASS' if all_pass else 'NOTE: some β1 ≤ 0'}")
 
     text = "\n".join(lines) + "\n"
     out_path.write_text(text, encoding="utf-8")
@@ -322,19 +339,31 @@ def main() -> None:
     out_dir: Path = args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    results: dict = {}
+    results_3: dict = {}   # (variant, n_players) -> (coeffs, se, r2, rmse, ratio)
+    results_2: dict = {}
+
     for fake_draw in [False, True]:
         variant = "fake-draw" if fake_draw else "original"
         for np_ in _PLAYER_COUNTS:
             print(f"Simulating {args.games} × {np_}p  [{variant}] …")
             X, y = run_batch(np_, args.n_hand, args.games, args.seed, fake_draw)
-            res = ols_lpm(X, y)
-            results[(variant, np_)] = res
-            c = res[0]
-            print(f"  Base={c[0]:.3f}  β1={c[1]:.4f}  β2={c[2]:.4f}  β3={c[3]:.4f}")
+            ratio = float(y.mean())
 
-    plot_beta_bars(results, out_dir / "beta_bars.png")
-    write_log(results, out_dir / "log.txt", args.games, args.n_hand)
+            # 3-lag model
+            c3, se3, r2_3, rmse3 = ols_lpm(X, y)
+            results_3[(variant, np_)] = (c3, se3, r2_3, rmse3, ratio)
+
+            # 2-lag model (drop lag-3 column)
+            c2, se2, r2_2, rmse2 = ols_lpm(X[:, :3], y)
+            results_2[(variant, np_)] = (c2, se2, r2_2, rmse2, ratio)
+
+            base, b1, b2, b3 = c3
+            approx = base + base * b1 + base * b1 * b2
+            print(f"  ratio={ratio:.3f}  Base={base:.3f}  β1={b1:.4f}  β2={c3[2]:.4f}  β3={b3:.4f}  approx={approx:.3f}")
+
+    plot_beta_grid(results_3, 3, out_dir / "beta_3lag.png")
+    plot_beta_grid(results_2, 2, out_dir / "beta_2lag.png")
+    write_log(results_3, results_2, out_dir / "log.txt", args.games, args.n_hand)
 
 
 if __name__ == "__main__":
