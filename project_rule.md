@@ -6,6 +6,7 @@ You will
 - parse the instructions/**.md file when instructed,
 - dump your understanding and plan in natural language into parsing/. Raise questions there if you need clarification
 - then compose the simulation scripts/ and put results to artifacts/
+- with key findings summarized into the tails of each instruction as well
 - all with corresponding file/directory naming with the instruction index.
 
 
