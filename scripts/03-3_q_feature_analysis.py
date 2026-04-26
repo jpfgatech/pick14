@@ -13,7 +13,7 @@ Seven summary features
   f2  unique_sums_lt14  / 7                (how many partial sums can match)
   f3  count_known_cats  / 7                (known categories: complement in pool)
   f4  = f2                                 (potential cats: all sums s<14 qualify)
-  f5  Σ min(pub_occ, 4)/4 over known cats  (total public-supply across known cats)
+  f5  Σ (pub_occ/4) over known cats, then /7  (no min(); tolerate column >1 if occ>4)
   f6  max (best_hand_pts+max_pub_pts)/18   (best normalised match score available)
   f7  max (best_hand_pts+2nd_pub_pts)/18   (best score if top public card is gone)
 
@@ -116,7 +116,7 @@ FEATURE_NAMES = [
     "f2  unique sums <14 / 7",
     "f3  known categories / 7",
     "f4  potential cats / 7  (= f2)",
-    "f5  Σ pub options / 4 across known cats",
+    "f5  Σ (pub count / 4) for known / 7",
     "f6  max (hand+pub pts) / 18",
     "f7  max (hand+2nd pub) / 18",
 ]
@@ -154,7 +154,7 @@ def compute_features(keys: np.ndarray, hand_cache: dict) -> np.ndarray:
             if pub_occ == 0:
                 continue
             n_known += 1
-            opts_sum += min(pub_occ, 4) / 4.0
+            opts_sum += pub_occ / 4.0
             hp = info["best_pts"][s]
             mp = (hp + MAX_SCORE[c]) / MAX_MATCH_PTS
             max_pts = max(max_pts, mp)
@@ -163,7 +163,11 @@ def compute_features(keys: np.ndarray, hand_cache: dict) -> np.ndarray:
                 max_sec = max(max_sec, sp)
 
         feats[i, 2] = n_known / 7.0
-        feats[i, 4] = opts_sum
+        # Per-column: min(pub, cap) / cap (cap=6 for complement game_value 5, else 4).
+        # Summary: (sum of those column values) / 7 — see instructions/03-3.md.  A 3-card
+        # hand has at most 7 subset sums; 4-card snapshots can have more “known” s and
+        # push sum/7 above 1.0 vs the 7-column design.
+        feats[i, 4] = opts_sum / 7.0
         feats[i, 5] = max_pts
         feats[i, 6] = max_sec
 
