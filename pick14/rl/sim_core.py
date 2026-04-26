@@ -2,6 +2,16 @@
 Pick14 simulation core per rl.md §1 — game flow, card rules, dummy policy, bench snapshots.
 
 Uses pick14.cards for Card / deck definitions only; transition logic is self-contained here.
+
+**Research — isolating draw luck from a committed action**
+    When ``immediate_draw=False`` on :func:`apply_match` or :func:`apply_play` /
+    :func:`apply_move`, the state pauses on ``TurnPhase.DRAW1`` (after a scoring
+    match) or ``TurnPhase.DRAW2`` (after a pass-match discard) so the caller
+    can observe the *expected* hand/public outcome of the action before the next
+    stochastic draw.  Follow up with :func:`apply_post_match_draw` and/or
+    :func:`apply_post_pass_draw` — they apply the same deck and empty-deck
+    rules as the ``immediate_draw=True`` path and must be called before normal
+    match/play policy runs.
 """
 
 from __future__ import annotations
@@ -194,6 +204,8 @@ def legal_moves(state: RlPick14State) -> list[Move]:
     """All legal atomic actions for the current player (match, or play to pool, or forced play)."""
     if is_finished(state):
         return []
+    if state.phase in (TurnPhase.DRAW1, TurnPhase.DRAW2):
+        return []
     p = state.current_player
     hand = state.hands[p]
     if not hand and state.phase != TurnPhase.PLAY:
@@ -217,6 +229,24 @@ def _resolve_draw2(state: RlPick14State) -> None:
     _draw_to_target(state, p, state.n_hand)
 
 
+def apply_post_match_draw(state: RlPick14State) -> None:
+    """
+    Apply Draw1 only (after a scoring match, before PLAY).
+
+    Call this when a prior :func:`apply_match` used ``immediate_draw=False`` and left
+    :attr:`RlPick14State.phase` as ``TurnPhase.DRAW1``.  Deck exhaustion is handled
+    like the monolithic path: this only refills; it does not advance the player
+    (the deck-empty branch is handled in :func:`apply_match` and never uses DRAW1).
+
+    Raises if ``state.phase != DRAW1``.
+    """
+    if is_finished(state):
+        raise RuntimeError("game finished")
+    if state.phase != TurnPhase.DRAW1:
+        raise ValueError(f"apply_post_match_draw requires phase DRAW1, got {state.phase!r}")
+    _resolve_draw1(state)
+
+
 def _draw_to_target(state: RlPick14State, player: int, target_hand_size: int) -> None:
     hand = state.hands[player]
     while len(hand) < target_hand_size and state.deck:
@@ -234,8 +264,39 @@ def _advance_player(state: RlPick14State) -> None:
     state.current_player = start
 
 
-def apply_play(state: RlPick14State, hand_index: int) -> None:
-    """rl.md §1.1 L9 — PLAY: discard one hand card to the pool (same protocol after Draw1 or after pass-match)."""
+def apply_post_pass_draw(state: RlPick14State) -> None:
+    """
+    Apply Draw2 and complete the play step (refill, advance player, return to MATCH).
+
+    Call this when a prior :func:`apply_play` used ``immediate_draw=False`` and left
+    ``TurnPhase.DRAW2`` (pass-match play path, discard already applied).
+
+    Raises if ``state.phase != DRAW2``.
+    """
+    if is_finished(state):
+        raise RuntimeError("game finished")
+    if state.phase != TurnPhase.DRAW2:
+        raise ValueError(f"apply_post_pass_draw requires phase DRAW2, got {state.phase!r}")
+    _resolve_draw2(state)
+    _advance_player(state)
+    state.phase = TurnPhase.MATCH
+
+
+def apply_play(
+    state: RlPick14State,
+    hand_index: int,
+    *,
+    immediate_draw: bool = True,
+) -> None:
+    """rl.md §1.1 L9 — PLAY: discard one hand card to the pool (same after Draw1 or after pass-match).
+
+    When ``immediate_draw`` is false and this discard is on the **pass-match** path
+    (``passed_match_this_turn`` was true), the pass-match Draw2 step is *not* applied:
+    the phase becomes ``TurnPhase.DRAW2`` and the caller must finish with
+    :func:`apply_post_pass_draw` (which also advances the player).  Default ``true``
+    keeps the legacy behaviour: Draw2, advance, and MATCH in one call — callers never
+    see intermediate DRAW1/DRAW2.
+    """
     if is_finished(state):
         raise RuntimeError("game finished")
     if state.phase != TurnPhase.PLAY:
@@ -252,10 +313,14 @@ def apply_play(state: RlPick14State, hand_index: int) -> None:
 
     if from_pass:
         state.phase = TurnPhase.DRAW2
-        _resolve_draw2(state)
-
-    _advance_player(state)
-    state.phase = TurnPhase.MATCH
+        if immediate_draw:
+            _resolve_draw2(state)
+            _advance_player(state)
+            state.phase = TurnPhase.MATCH
+        # deferred: hold at DRAW2; caller must apply_post_pass_draw
+    else:
+        _advance_player(state)
+        state.phase = TurnPhase.MATCH
 
 
 def apply_pass_match(state: RlPick14State) -> None:
@@ -270,7 +335,24 @@ def apply_pass_match(state: RlPick14State) -> None:
     state.passed_match_this_turn = True
 
 
-def apply_match(state: RlPick14State, public_index: int, hand_indices: tuple[int, ...]) -> None:
+def apply_match(
+    state: RlPick14State,
+    public_index: int,
+    hand_indices: tuple[int, ...],
+    *,
+    immediate_draw: bool = True,
+) -> None:
+    """
+    Scoring match: move cards to the score pile, then either Draw1 → PLAY, or
+    (if the deck is empty) advance the current player to MATCH for the next seat.
+
+    When ``immediate_draw`` is false and the deck is not exhausted, the state is
+    left at ``TurnPhase.DRAW1`` (cards to score and public are already updated)
+    and the caller must call :func:`apply_post_match_draw` before the forced PLAY
+    sub-phase.  This isolates post-match *luck* (draw) from the known post-match
+    hand–public state for research.  Default ``true`` is legacy: Draw1 is applied
+    in the same call, so no intermediate DRAW1 is observable.
+    """
     if is_finished(state):
         raise RuntimeError("game finished")
     p = state.current_player
@@ -299,19 +381,30 @@ def apply_match(state: RlPick14State, public_index: int, hand_indices: tuple[int
     state.passed_match_this_turn = False
     if not deck_exhausted(state):
         state.phase = TurnPhase.DRAW1
-        _resolve_draw1(state)
+        if immediate_draw:
+            _resolve_draw1(state)
     else:
         _advance_player(state)
         state.phase = TurnPhase.MATCH
 
 
-def apply_move(state: RlPick14State, move: Move) -> None:
+def apply_move(
+    state: RlPick14State,
+    move: Move,
+    *,
+    immediate_draw: bool = True,
+) -> None:
     if isinstance(move, PassMatch):
         apply_pass_match(state)
     elif isinstance(move, PlayMove):
-        apply_play(state, move.hand_index)
+        apply_play(state, move.hand_index, immediate_draw=immediate_draw)
     else:
-        apply_match(state, move.public_index, move.hand_indices)
+        apply_match(
+            state,
+            move.public_index,
+            move.hand_indices,
+            immediate_draw=immediate_draw,
+        )
 
 
 def match_capture_points(state: RlPick14State, move: MatchMove) -> int:
@@ -392,6 +485,11 @@ def caution_play(state: RlPick14State) -> PlayMove:
 
 
 def choose_dummy_move(state: RlPick14State) -> Move:
+    """Sample baseline move.  If the state is stuck in DRAW1/2 (e.g. after ``immediate_draw=False``), applies the pending draw(s) (deterministic) and continues."""
+    if state.phase == TurnPhase.DRAW1:
+        apply_post_match_draw(state)
+    elif state.phase == TurnPhase.DRAW2:
+        apply_post_pass_draw(state)
     if state.phase == TurnPhase.PLAY:
         return greedy_stingy_play(state)
     m = greedy_stingy_match(state)
