@@ -34,7 +34,7 @@ def test_collect_returns_kind_and_length_match() -> None:
     if len(feats) == 0:
         pytest.skip("no samples in short run")
     assert len(feats) == len(gap) == len(kind)
-    assert int(kind.min()) >= 0 and int(kind.max()) <= 2
+    assert int(kind.min()) >= 0 and int(kind.max()) <= 3
 
 
 def test_f6_at_most_max_match_points() -> None:

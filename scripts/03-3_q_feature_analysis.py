@@ -15,8 +15,10 @@ Snapshot timing
   B2 (play on match turn) — after apply_play: discard applied; no draw2 on
                match path so snapshot is immediate.
 
-**Three snapshot categories (for analysis):** ``A_match``, ``A_pass``,
-``B`` = B1 and B2 combined (post-play snapshot).
+**Four snapshot labels (in the dataset):** ``A_match``, ``A_pass``,
+``B_post_pass`` (B1, play after a pass, pre-DRAW2), ``B_post_match`` (B2, play
+after a match, no DRAW2 on that path).  The simulation already branches on
+``was_pass``; the label is the branch taken.
 
 Features are stored **without** /7 or /18 normalisation (raw counts and raw
 score points) so off-by-one and scaling bugs are easier to see.
@@ -79,8 +81,16 @@ MAX_MATCH_PTS = 18.0
 
 SNAP_A_MATCH = 0
 SNAP_A_PASS = 1
-SNAP_B_PLAY = 2  # B1 (play after pass) and B2 (play after match) combined
-SNAP_KIND_LABELS = ("A (match)", "A (pass)", "B (play)")
+# Play-phase snapshots: distinguish pre-draw (after pass) vs no second draw
+# (after match), matching ``was_pass`` in ``simulate_game``.
+SNAP_B_POST_PASS = 2   # B1: apply_play after pass_match, DRAW2 may follow
+SNAP_B_POST_MATCH = 3  # B2: apply_play after a match, no DRAW2
+SNAP_KIND_LABELS = (
+    "A (match)",
+    "A (pass)",
+    "B (post-pass play)",
+    "B (post-match play)",
+)
 
 FEATURE_NAMES = [
     "f1  distinct subset-sums  (count)",
@@ -255,7 +265,7 @@ def simulate_game(
                 # Snapshot B1: DRAW2 not yet applied — pre-draw state.
                 anchors.append(SnapAnchor(
                     _hand_features(state.hands[p], state.public), p, j,
-                    SNAP_B_PLAY,
+                    SNAP_B_POST_PASS,
                 ))
                 if state.phase == TurnPhase.DRAW2 and not is_finished(state):
                     apply_post_pass_draw(state)
@@ -264,7 +274,7 @@ def simulate_game(
                 # Snapshot B2: no draw2 on match path; snapshot is immediate.
                 anchors.append(SnapAnchor(
                     _hand_features(state.hands[p], state.public), p, j,
-                    SNAP_B_PLAY,
+                    SNAP_B_POST_MATCH,
                 ))
 
         else:
@@ -487,15 +497,15 @@ def plot_features_by_category(
     feats: np.ndarray, gap: np.ndarray, kind: np.ndarray, out_path: Path,
     n_games: int, n_players: int,
 ) -> None:
-    fig, axes = plt.subplots(6, 4, figsize=(18, 16))
+    n_kinds = len(SNAP_KIND_LABELS)
+    fig, axes = plt.subplots(2 * n_kinds, 4, figsize=(18, 3.2 * n_kinds + 1))
     fig.suptitle(
-        f"N+1 gap vs feature by snapshot kind  (three 2×4 blocks: {SNAP_KIND_LABELS[0]} / "
-        f"{SNAP_KIND_LABELS[1]} / {SNAP_KIND_LABELS[2]})  "
+        f"N+1 gap vs feature by snapshot kind  (four 2×4 blocks)  "
         f"({len(gap):,} s, {n_games:,} g, {n_players}p)\n"
-        "B = B1 ∪ B2.  discrete x, no width binning.",
-        fontsize=8, y=0.995,
+        "B post-pass = B1, B post-match = B2.  discrete x, no width binning.",
+        fontsize=8, y=0.998,
     )
-    for kind_idx in range(3):
+    for kind_idx in range(n_kinds):
         m = (kind == kind_idx)
         nk = int(np.sum(m))
         for fi in range(N_FEATURES):
@@ -510,9 +520,9 @@ def plot_features_by_category(
             if c == 0:
                 ax.set_ylabel(
                     f"{SNAP_KIND_LABELS[kind_idx]}\n(n={nk:,})  gap",
-                    fontsize=6,
+                    fontsize=5.5,
                 )
-    for b in range(3):
+    for b in range(n_kinds):
         axes[2 * b + 1, 3].set_visible(False)
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
@@ -533,7 +543,8 @@ def write_log(
         "",
         f"  Snapshot counts:  {SNAP_KIND_LABELS[0]}: {int(np.sum(kind==0)):,}  "
         f"{SNAP_KIND_LABELS[1]}: {int(np.sum(kind==1)):,}  "
-        f"{SNAP_KIND_LABELS[2]}: {int(np.sum(kind==2)):,}",
+        f"{SNAP_KIND_LABELS[2]}: {int(np.sum(kind==2)):,}  "
+        f"{SNAP_KIND_LABELS[3]}: {int(np.sum(kind==3)):,}",
         "",
         f"{'feature':<48}  {'min':>6}  {'max':>6}  {'mean':>6}  {'pearson_r':>9}",
     ]
