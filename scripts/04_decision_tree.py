@@ -6,29 +6,30 @@ Part 1 — Fixed-deck exhaustive DFS over player decisions.
   * Fixed RNG seed → fixed deck order → draws are deterministic given the deck.
   * At each game state enumerate legal_moves().  Draws (DRAW1/DRAW2) are
     resolved inline (they are forced; no branching).
-  * If ≥ 2 legal moves: checkpoint; spawn one clone per branch.
+  * If two or more *meaningful* branches: checkpoint.  (Exactly one match +
+    pass: no branch; always match.)
   * Record: nodes, terminal nodes, checkpoints, branch-count distribution,
     elapsed DFS time vs single-pass baseline.
   * Safety: halt at NODE_LIMIT to prevent OOM.
 
-Part 2 — Per-checkpoint deck reshuffle.
-  * At every checkpoint, additionally try N re-shuffles of the *remaining*
-    (undealt) deck.  Each shuffle creates an independent deck-ordering branch
-    that is DFS-explored in full.
-  * Total children at a checkpoint with B player options and N reshuffles:
-        B * (N + 1)    (original ordering + N shuffles)
-  * Evaluate how node count and time scale with N = 0, 1, 2, …
+Part 2 — (optional) Per-checkpoint deck reshuffle.
+  * Off by default.  At every checkpoint, additionally try N re-shuffles of the
+    remaining deck.  Total children per checkpoint: ``B * (N + 1)``.
+
+**Match vs pass:** if the only ambiguity is **exactly one** legal
+:class:`MatchMove` plus :class:`PassMatch` (two legal moves total), we do **not**
+branch: we always take the match (no checkpoint).  Real checkpoints are
+multiple distinct matches and/or PLAY with 2+ cards.
 
 Usage
 -----
-  python scripts/04_decision_tree.py [--n-players 4] [--n-hand 3]
+  python scripts/04_decision_tree.py [--player-counts 4 2] [--n-hand 3]
                                       [--seed 42] [--node-limit 200000]
-                                      [--max-reshuffles 3]
+                                      [--max-reshuffles 0]
 """
 from __future__ import annotations
 
 import argparse
-import sys
 import time
 from collections import Counter
 from dataclasses import dataclass, field
@@ -36,6 +37,7 @@ from pathlib import Path
 from random import Random
 
 from pick14.rl.sim_core import (
+    MatchMove,
     PassMatch,
     RlPick14State,
     TurnPhase,
@@ -70,6 +72,32 @@ def _advance_forced(state: RlPick14State) -> bool:
             apply_post_pass_draw(state)
         skip_empty_hands(state)
     return is_finished(state)
+
+
+def single_match_plus_pass(moves: list) -> bool:
+    """True iff legal moves are exactly one :class:`MatchMove` and one pass."""
+    if len(moves) != 2:
+        return False
+    n_match = sum(1 for m in moves if isinstance(m, MatchMove))
+    n_pass = sum(1 for m in moves if isinstance(m, PassMatch))
+    return n_match == 1 and n_pass == 1
+
+
+def the_forced_match_move(moves: list) -> MatchMove:
+    """Return the sole :class:`MatchMove` when ``single_match_plus_pass`` is true."""
+    for m in moves:
+        if isinstance(m, MatchMove):
+            return m
+    raise ValueError("expected exactly one MatchMove")
+
+
+def is_real_checkpoint(moves: list) -> bool:
+    """Branching worth exploring: not a forced single match vs pass."""
+    if len(moves) <= 1:
+        return False
+    if single_match_plus_pass(moves):
+        return False
+    return True
 
 
 # ── DFS stats ─────────────────────────────────────────────────────────────────
@@ -121,6 +149,12 @@ def _dfs(
         return
 
     stats.n_nodes += 1
+
+    # One legal match + pass: always match (no checkpoint, no pass branch).
+    if single_match_plus_pass(moves):
+        apply_move(state, the_forced_match_move(moves))
+        _dfs(state, stats, node_limit, rng_reshuffles, n_reshuffles, depth + 1)
+        return
 
     if len(moves) == 1:
         # Forced action — no branching.
@@ -180,7 +214,9 @@ def run_single_pass(n_players: int, n_hand: int, seed: int) -> tuple[float, int,
     Run one game with greedy-stingy match + caution play.
 
     Returns (elapsed_ms, n_decisions, n_checkpoints_along_path).
-    A 'decision' on the single path = a state with ≥ 2 legal moves.
+    A 'decision' on the single path = a state with a legal move.
+    Checkpoints on the path = :func:`is_real_checkpoint` (excludes
+    single-match vs pass).
     """
     rng = Random(seed)
     state = new_game(n_players, rng=rng, n_hand=n_hand)
@@ -196,7 +232,7 @@ def run_single_pass(n_players: int, n_hand: int, seed: int) -> tuple[float, int,
         if state.phase == TurnPhase.MATCH:
             m = greedy_stingy_match(state)
             moves = legal_moves(state)
-            if len(moves) > 1:
+            if is_real_checkpoint(moves):
                 n_checkpoints += 1
             if m:
                 apply_move(state, m)
@@ -206,7 +242,7 @@ def run_single_pass(n_players: int, n_hand: int, seed: int) -> tuple[float, int,
 
         elif state.phase == TurnPhase.PLAY:
             moves = legal_moves(state)
-            if len(moves) > 1:
+            if is_real_checkpoint(moves):
                 n_checkpoints += 1
             apply_move(state, caution_play(state))
             n_decisions += 1
@@ -264,95 +300,106 @@ def _print_section(title: str, lines: list[str]) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--n-players",      type=int, default=4)
+    ap.add_argument(
+        "--player-counts", type=int, nargs="*", default=None,
+        metavar="N",
+        help="Run fixed-deck DFS for each player count (default: 4 2).",
+    )
     ap.add_argument("--n-hand",         type=int, default=3)
     ap.add_argument("--seed",           type=int, default=42)
     ap.add_argument("--node-limit",     type=int, default=200_000,
                     help="safety cap on DFS nodes per run")
-    ap.add_argument("--max-reshuffles", type=int, default=3,
-                    help="Part 2: try N=0..max_reshuffles deck reshuffles per checkpoint")
+    ap.add_argument(
+        "--max-reshuffles", type=int, default=0,
+        help="If >0, also run N=1..N deck reshuffle experiments per checkpoint",
+    )
     ap.add_argument("--out-dir",        type=Path,
                     default=Path(__file__).parent.parent / "artifacts" / "04")
     args = ap.parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)
+    player_counts = args.player_counts if args.player_counts else [4, 2]
 
     sep = "=" * 72
-    print(sep)
-    print(f"04  Decision-tree size  |  {args.n_players}p  n_hand={args.n_hand}  seed={args.seed}")
-    print(sep)
-
-    # ── Single-pass baseline ─────────────────────────────────────────────────
-    sp_ms, sp_decisions, sp_checkpoints = run_single_pass(
-        args.n_players, args.n_hand, args.seed,
-    )
-    _print_section(
-        "Single-pass baseline (greedy-stingy + caution play)",
-        [
-            f"  elapsed: {sp_ms:.3f} ms",
-            f"  decisions (steps with ≥1 legal move): {sp_decisions}",
-            f"  checkpoints (≥2 legal moves):          {sp_checkpoints}",
-        ],
-    )
-
-    # ── Part 1: fixed-deck DFS (N=0 reshuffles) ──────────────────────────────
-    all_results: list[tuple[int, DfsStats]] = []
-
-    for n_r in range(args.max_reshuffles + 1):
-        tag = (
-            "Part 1 — DFS, fixed deck (N=0 reshuffles)"
-            if n_r == 0
-            else f"Part 2 — DFS, N={n_r} deck reshuffle(s) per checkpoint"
-        )
-        stats = run_dfs(
-            args.n_players, args.n_hand, args.seed,
-            args.node_limit, n_reshuffles=n_r,
-        )
-        all_results.append((n_r, stats))
-        _print_section(tag, _fmt_stats(stats, n_r))
-        if stats.node_limit_hit:
-            print(
-                f"  NOTE: node limit ({args.node_limit:,}) reached — "
-                "true tree is larger; increase --node-limit to explore further."
-            )
-
-    # ── Summary table ────────────────────────────────────────────────────────
-    print("\n" + sep)
-    print("Summary: node count and time vs N reshuffles (cap =", f"{args.node_limit:,})")
-    print("-" * 60)
-    print(f"  {'N reshuffles':>12}  {'nodes':>10}  {'terminals':>10}  "
-          f"{'checkpoints':>12}  {'time_ms':>8}  {'limit_hit':>9}")
-    for n_r, st in all_results:
+    out_log: list[str] = []
+    for np in player_counts:
+        if np < 2:
+            print(f"Skipping n_players={np} (need >= 2)", flush=True)
+            continue
+        out_log.extend(["", "", sep, f"  {np} players  n_hand={args.n_hand}  seed={args.seed}", sep, ""])
+        print(sep)
         print(
-            f"  {n_r:>12}  {st.n_nodes:>10,}  {st.n_terminals:>10,}  "
-            f"{st.n_checkpoints:>12,}  {st.dfs_ms:>8.1f}  "
-            f"{'YES' if st.node_limit_hit else 'no':>9}"
+            f"04  Decision-tree  |  {np}p  n_hand={args.n_hand}  seed={args.seed}  "
+            f"(1 match+pass = forced match, no branch)",
+        )
+        print(sep)
+
+        sp_ms, sp_decisions, sp_checkpoints = run_single_pass(
+            np, args.n_hand, args.seed,
+        )
+        out_log.extend(
+            [
+                f"Single-pass: {sp_ms:.3f} ms  decisions={sp_decisions}  "
+                f"real_checkpoint path={sp_checkpoints}\n",
+            ],
+        )
+        _print_section(
+            "Single-pass baseline (greedy-stingy + caution play)",
+            [
+                f"  elapsed: {sp_ms:.3f} ms",
+                f"  decisions (steps with ≥1 legal move): {sp_decisions}",
+                f"  real checkpoints (not 1 match vs pass):  {sp_checkpoints}",
+            ],
         )
 
-    # ── Save log ─────────────────────────────────────────────────────────────
-    out_lines: list[str] = [
-        sep,
-        f"04  Decision-tree size  |  {args.n_players}p  n_hand={args.n_hand}  seed={args.seed}",
-        sep,
-        "",
-        f"Single-pass baseline: {sp_ms:.3f} ms  |  {sp_decisions} decisions  |  "
-        f"{sp_checkpoints} checkpoints on greedy path",
-        "",
-        f"Node limit: {args.node_limit:,}",
-        "",
-        f"{'N':>3}  {'nodes':>10}  {'terminals':>10}  {'checkpoints':>12}  "
-        f"{'ms':>8}  {'limit_hit':>9}",
-    ]
-    for n_r, st in all_results:
-        out_lines.append(
-            f"{n_r:>3}  {st.n_nodes:>10,}  {st.n_terminals:>10,}  "
-            f"{st.n_checkpoints:>12,}  {st.dfs_ms:>8.1f}  "
-            f"{'YES' if st.node_limit_hit else 'no':>9}"
+        all_results: list[tuple[int, DfsStats]] = []
+        for n_r in range(args.max_reshuffles + 1):
+            tag = (
+                "Fixed-deck DFS (N=0 extra deck orderings at checkpoints)"
+                if n_r == 0
+                else f"Optional — N={n_r} deck reshuffle(s) per checkpoint"
+            )
+            stats = run_dfs(
+                np, args.n_hand, args.seed,
+                args.node_limit, n_reshuffles=n_r,
+            )
+            all_results.append((n_r, stats))
+            _print_section(tag, _fmt_stats(stats, n_r))
+            if stats.node_limit_hit:
+                print(
+                    f"  NOTE: node limit ({args.node_limit:,}) reached — "
+                    "true tree is larger; increase --node-limit to explore further.",
+                )
+            out_log.append(f"\n--- {tag} ---\n")
+            for ln in _fmt_stats(stats, n_r):
+                out_log.append(ln + "\n")
+
+        print("\n" + sep)
+        print(
+            f"Summary  {np}p  (node cap = {args.node_limit:,}  |  "
+            f"N reshuffle runs: 0..{args.max_reshuffles})",
         )
-        for ln in _fmt_stats(st, n_r):
-            out_lines.append("     " + ln.strip())
+        print("-" * 64)
+        print(
+            f"  {'N reshuffles':>12}  {'nodes':>10}  {'terminals':>10}  "
+            f"{'checkpoints':>12}  {'time_ms':>8}  {'limit_hit':>9}",
+        )
+        for n_r, st in all_results:
+            print(
+                f"  {n_r:>12}  {st.n_nodes:>10,}  {st.n_terminals:>10,}  "
+                f"{st.n_checkpoints:>12,}  {st.dfs_ms:>8.1f}  "
+                f"{'YES' if st.node_limit_hit else 'no':>9}",
+            )
+        out_log.append(
+            f"\nSummary {np}p:  "
+            + "  ".join(
+                f"N={n_r} nodes={st.n_nodes} ms={st.dfs_ms:.0f} hit={st.node_limit_hit}"
+                for n_r, st in all_results
+            )
+            + "\n",
+        )
 
     log_path = args.out_dir / "log.txt"
-    log_path.write_text("\n".join(out_lines) + "\n", encoding="utf-8")
+    log_path.write_text("\n".join(out_log), encoding="utf-8")
     print(f"\n  → {log_path}")
 
 

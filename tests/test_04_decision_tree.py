@@ -10,6 +10,21 @@ _m = importlib.util.module_from_spec(_spec)
 sys.modules["q4"] = _m
 _spec.loader.exec_module(_m)
 
+from pick14.rl.sim_core import MatchMove, PassMatch  # noqa: E402
+
+
+def test_single_match_plus_pass() -> None:
+    assert _m.single_match_plus_pass([MatchMove(0, (0,)), PassMatch()])
+    assert not _m.single_match_plus_pass(
+        [MatchMove(0, (0,)), MatchMove(0, (1,)), PassMatch()]
+    )
+    assert not _m.is_real_checkpoint(
+        [MatchMove(0, (0,)), PassMatch()]
+    )
+    assert _m.is_real_checkpoint(
+        [MatchMove(0, (0,)), MatchMove(0, (1,)), PassMatch()]
+    )
+
 
 def test_single_pass_completes() -> None:
     ms, decisions, checkpoints = _m.run_single_pass(4, 3, 42)
