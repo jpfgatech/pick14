@@ -30,7 +30,7 @@ Output: R², RMSE, coefficients, plots.
 
 Usage
 -----
-  python scripts/03-4_linear_regression.py [--games 20000] [--n-players 4]
+  python scripts/03-4_linear_regression.py [--games 20000] [--n-players 2]
 """
 from __future__ import annotations
 
@@ -340,38 +340,82 @@ def run_regression(
 
 # ── Plotting ──────────────────────────────────────────────────────────────────
 
-def _coef_label(name: str) -> str:
-    """Short label for plot tick."""
-    return name.replace("x1", "x1").replace("x2", "x2")\
-               .replace("x3", "x3").replace("x4", "x4")
-
-
-def plot_coefficients(
+def plot_coefficient_curves(
     results: list[RegressionResult], out_path: Path,
 ) -> None:
-    n_panels = len(results)
-    fig, axes = plt.subplots(1, n_panels, figsize=(7 * n_panels, 6), squeeze=False)
-    for ax, res in zip(axes[0], results):
-        names = res.feat_names
-        # drop bias from plot
-        idx = [i for i, n in enumerate(names) if n != "bias"]
-        coef = res.coef[idx]
-        labels = [_coef_label(names[i]) for i in idx]
-        order = np.argsort(np.abs(coef))[::-1][:30]  # top-30 by magnitude
-        c = coef[order]
-        lbl = [labels[o] for o in order]
-        colors = ["#2563eb" if v >= 0 else "#dc2626" for v in c]
-        ax.barh(range(len(c)), c, color=colors)
-        ax.set_yticks(range(len(c)))
-        ax.set_yticklabels(lbl, fontsize=7)
-        ax.axvline(0, color="grey", lw=0.6)
-        ax.set_title(
-            f"Model {res.model}  {res.horizon}\nR²={res.r2:.4f}  "
-            f"RMSE={res.rmse:.3f}  n={res.n:,}",
-            fontsize=9,
+    """
+    For each (model, horizon), plot coefficient **vs. sum slot** s=1..13 for
+    each feature **type** (x1, x2, …), and a horizontal line for the **bias**
+    (intercept).
+    """
+    if not results:
+        return
+    n = len(results)
+    ncols = 2
+    nrows = (n + ncols - 1) // ncols
+    fig, axes = plt.subplots(
+        nrows, ncols, figsize=(6.4 * ncols, 3.6 * nrows), squeeze=False,
+    )
+    s_axis = np.array(SUMS, dtype=np.float64)
+    colors = {
+        "x1": "#2563eb",
+        "x2": "#dc2626",
+        "x3": "#16a34a",
+        "x4": "#ca8a04",
+    }
+    for ax, res in zip(axes.flat, results):
+        c = res.coef
+        if res.model == "A":
+            ax.plot(
+                s_axis, c[0:13], "o-", ms=3, lw=1.1,
+                color=colors["x1"], label="x1",
+            )
+            ax.plot(
+                s_axis, c[13:26], "s-", ms=3, lw=1.1,
+                color=colors["x2"], label="x2",
+            )
+            b = float(c[26])
+        else:
+            ax.plot(
+                s_axis, c[0:13], "o-", ms=2.5, lw=1.0,
+                color=colors["x1"], label="x1",
+            )
+            ax.plot(
+                s_axis, c[13:26], "s-", ms=2.5, lw=1.0,
+                color=colors["x2"], label="x2",
+            )
+            ax.plot(
+                s_axis, c[26:39], "^-", ms=2.5, lw=1.0,
+                color=colors["x3"], label="x3",
+            )
+            ax.plot(
+                s_axis, c[39:52], "v-", ms=2.5, lw=1.0,
+                color=colors["x4"], label="x4",
+            )
+            b = float(c[52])
+        ax.axhline(0.0, color="grey", lw=0.5, zorder=0)
+        ax.axhline(
+            b, color="#64748b", ls="--", lw=1.2, zorder=0,
+            label=f"bias = {b:+.4f}",
         )
-        ax.set_xlabel("coefficient", fontsize=8)
-    fig.tight_layout()
+        ax.set_xlabel("s (hand subset game_value sum)", fontsize=8)
+        ax.set_ylabel("coefficient", fontsize=8)
+        ax.set_title(
+            f"Model {res.model}  {res.horizon}   "
+            f"R²={res.r2:.4f}  RMSE={res.rmse:.3f}  n={res.n:,}",
+            fontsize=8,
+        )
+        ax.legend(loc="best", fontsize=6, ncol=2)
+        ax.set_xticks(s_axis[::2])
+        ax.set_xticks(s_axis, minor=True)
+        ax.grid(True, which="major", axis="y", alpha=0.3)
+    for j in range(len(results), nrows * ncols):
+        axes.flat[j].set_visible(False)
+    fig.suptitle(
+        "OLS coefficients by sum coordinate s (1…13) and bias (horizontal)",
+        fontsize=10, y=1.02,
+    )
+    fig.tight_layout(rect=[0, 0, 1, 0.97])
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
     print(f"  → {out_path.name}", flush=True)
@@ -389,7 +433,8 @@ def plot_r2_summary(
                 f"{v:.4f}", ha="center", va="bottom", fontsize=9)
     ax.set_ylabel("R²", fontsize=10)
     ax.set_title("R² — own next / next+1 match score (03-4)", fontsize=10)
-    ax.set_ylim(0, max(r2s) * 1.15 + 0.01)
+    y_top = max(r2s) * 1.15 + 0.01 if r2s else 0.1
+    ax.set_ylim(0, y_top)
     ax.grid(axis="y", alpha=0.3)
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
@@ -440,7 +485,8 @@ def write_log(
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--games",     type=int, default=20_000)
-    ap.add_argument("--n-players", type=int, default=4)
+    ap.add_argument("--n-players", type=int, default=2,
+                    help="number of players (default: 2)")
     ap.add_argument("--n-hand",    type=int, default=3)
     ap.add_argument("--seed",      type=int, default=0)
     ap.add_argument("--out-dir",   type=Path,
@@ -460,7 +506,7 @@ def main() -> None:
 
     print("Plotting …", flush=True)
     plot_r2_summary(results, args.out_dir / "r2_summary.png")
-    plot_coefficients(results, args.out_dir / "coefficients.png")
+    plot_coefficient_curves(results, args.out_dir / "coefficients.png")
 
     write_log(results, args.out_dir / "log.txt", args.games, args.n_players)
 
