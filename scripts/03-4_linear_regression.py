@@ -1,27 +1,32 @@
 #!/usr/bin/env python3
 """
-03-4  Linear regression on per-sum hand features vs N+1 / N+2 point-gap.
+03-4  Linear regression on per-sum hand features vs own next / next+1 *match* score.
 
-Two models (see instructions/03-4.md):
+**Targets (not point gap):** points the *current* player scores on the next
+match turn (N+1) and the one after (N+2).  No opponent aggregate — aligned with
+features that do not contain opponent *status* (only our hand + public pool).
 
-  Model A  — 27 features (13*2 + bias)
-    x1[s]   binary: does any hand subset sum to s?           s = 1..13
-    x2[s]   integer count: how many hand subsets sum to s?
+  Model A  — 27 features (13*2 + bias), s = 1..13
+    x1[s]   max  score_value  sum  over  hand  subsets  with  game_value  sum  s
+            (0 if no such subset)
+    x2[s]   0 if k≤1;  2 * (k − 1)  where  k  =  number  of  non-empty
+            hand subsets  with  sum  s  (rewards each extra  combination)
 
   Model B  — 53 features (13*4 + bias)
-    x1[s], x2[s]  same as Model A
-    x3[s]   score_value of the BEST  public card of game_value (14-s),
-            0 if complement absent (not a known category)
-    x4[s]   score_value of the 2nd-best public card of game_value (14-s),
-            0 if fewer than 2 such cards
+    x1, x2  as in Model A
+    x3[s]   best *category* total:  (max hand  pts  for  sum  s)  +  best
+            public  score  at  game_value  (14−s)  for  a  *known* category;
+            0  if  not  a  known  match  (no  public  target  *or*  no  hand
+            combination  to  s)
+    x4[s]   same  with  *second*  public  at  the  complement,  0  if
+            fewer  than  two  public  cards  of  (14−s)  (no  “backup”  target)
 
-Both models include a bias (intercept) term.
+Both include bias.
 
-Two outcomes per model:
-  gap_N1  N+1 point-gap  (same horizon as 03-3)
-  gap_N2  N+2 point-gap
+  score_N1  points on next match  turn
+  score_N2  points  on  the  following  match  turn  (NaN  if  missing)
 
-Output: R² for each (model × horizon), sorted regression coefficients, plots.
+Output: R², RMSE, coefficients, plots.
 
 Usage
 -----
@@ -71,48 +76,69 @@ N_FEAT_B = N_SUMS * 4 + 1   # 53  (x1..x4 per sum, bias)
 
 # ── Feature vector computation ────────────────────────────────────────────────
 
+def _subsets_by_sum(hand: list[Card]) -> dict[int, list[tuple[Card, ...]]]:
+    """Non-empty hand subsets, grouped by game_value sum 1..13."""
+    by: dict[int, list[tuple[Card, ...]]] = defaultdict(list)
+    n = len(hand)
+    for r in range(1, n + 1):
+        for idx in combinations(range(n), r):
+            cards = tuple(hand[i] for i in idx)
+            s = sum(game_value(c) for c in cards)
+            if 1 <= s <= 13:
+                by[s].append(cards)
+    return by
+
+
 def build_feature_vectors(
     hand: list[Card], public: list[Card]
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Return (feat_A [N_FEAT_A], feat_B [N_FEAT_B]).
 
-    x1[s-1] = 1 if any subset sums to s   (binary)
-    x2[s-1] = number of subsets summing to s
-    x3[s-1] = score of best  pub card of game_value (14-s), else 0
-    x4[s-1] = score of 2nd   pub card of game_value (14-s), else 0
-    last element = 1.0  (bias)
+    x1[s-1] = max hand score_value sum among subsets with game_value sum s (or 0)
+    x2[s-1] = 0 if k <= 1 else 2 * (k - 1), k = # subsets with sum s
+    x3, x4    category totals (hand + pub), 0 if not a known 14-sum category
+    or x4  if  <2  public  cards  of  the  complement
     """
-    # ── hand combinatorics ───────────────────────────────────────────────────
-    count_by_sum: dict[int, int] = defaultdict(int)
-    for r in range(1, len(hand) + 1):
-        for idx in combinations(range(len(hand)), r):
-            s = sum(game_value(hand[i]) for i in idx)
-            if 1 <= s <= 13:
-                count_by_sum[s] += 1
+    by_sum = _subsets_by_sum(hand)
 
-    x1 = np.zeros(N_SUMS, np.float32)
-    x2 = np.zeros(N_SUMS, np.float32)
-    for s, cnt in count_by_sum.items():
-        x1[s - 1] = 1.0
-        x2[s - 1] = float(cnt)
-
-    # ── public pool scores per complement ────────────────────────────────────
     pub_by_gv: dict[int, list[int]] = defaultdict(list)
     for c in public:
         pub_by_gv[game_value(c)].append(score_value(c))
+    for gv in list(pub_by_gv.keys()):
+        pub_by_gv[gv].sort(reverse=True)
+
+    x1 = np.zeros(N_SUMS, np.float32)
+    x2 = np.zeros(N_SUMS, np.float32)
+    for s in SUMS:
+        combos = by_sum.get(s, [])
+        k = len(combos)
+        if k == 0:
+            continue
+        max_hp = max(
+            float(sum(score_value(c) for c in co)) for co in combos
+        )
+        x1[s - 1] = max_hp
+        x2[s - 1] = float(2 * max(0, k - 1))
 
     x3 = np.zeros(N_SUMS, np.float32)
     x4 = np.zeros(N_SUMS, np.float32)
     for s in SUMS:
+        combos = by_sum.get(s, [])
+        if not combos:
+            continue
         comp = 14 - s
         if comp < 1 or comp > 13:
             continue
-        scores = sorted(pub_by_gv[comp], reverse=True)
-        if scores:
-            x3[s - 1] = float(scores[0])
-        if len(scores) >= 2:
-            x4[s - 1] = float(scores[1])
+        pub_sc = pub_by_gv[comp]
+        if not pub_sc:
+            continue
+        max_hp = max(
+            float(sum(score_value(c) for c in co)) for co in combos
+        )
+        x3[s - 1] = max_hp + float(pub_sc[0])
+        if len(pub_sc) >= 2:
+            x4[s - 1] = max_hp + float(pub_sc[1])
 
     bias = np.ones(1, np.float32)
     feat_a = np.concatenate([x1, x2, bias])
@@ -206,14 +232,15 @@ def collect_samples(
     report_every: int = 2000,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
-    Return (feat_A [N, N_FEAT_A], feat_B [N, N_FEAT_B], gap_N1 [N], gap_N2 [N]).
+    Return (feat_A, feat_B, score_N1, score_N2).
 
-    Rows where N+2 is unavailable carry NaN in gap_N2.
+    score_N* = the snapshot player's own match **points** on the next 1/2
+    **match** turns.  (Not table gap.)  score_N2 is NaN if j+2 missing.
     """
     all_fa:  list[np.ndarray] = []
     all_fb:  list[np.ndarray] = []
-    all_g1:  list[float] = []
-    all_g2:  list[float] = []
+    all_s1:  list[float] = []
+    all_s2:  list[float] = []
     t0 = perf_counter()
 
     for i in range(n_games):
@@ -222,22 +249,18 @@ def collect_samples(
 
         for anc in anchors:
             p, j = anc.player, anc.turn_idx
-            # N+1 horizon
             if any(len(turns[q]) <= j + 1 for q in range(n_p)):
                 continue
-            pts1 = [turns[q][j + 1].pts for q in range(n_p)]
-            g1 = pts1[p] - sum(pts1) / n_p
-            # N+2 horizon (NaN if unavailable)
+            s1 = float(turns[p][j + 1].pts)
             if any(len(turns[q]) <= j + 2 for q in range(n_p)):
-                g2 = float("nan")
+                s2 = float("nan")
             else:
-                pts2 = [turns[q][j + 2].pts for q in range(n_p)]
-                g2 = pts2[p] - sum(pts2) / n_p
+                s2 = float(turns[p][j + 2].pts)
 
             all_fa.append(anc.feat_a)
             all_fb.append(anc.feat_b)
-            all_g1.append(g1)
-            all_g2.append(g2)
+            all_s1.append(s1)
+            all_s2.append(s2)
 
         if (i + 1) % report_every == 0:
             ms = (perf_counter() - t0) * 1000 / (i + 1)
@@ -245,12 +268,12 @@ def collect_samples(
 
     feats_a = np.stack(all_fa).astype(np.float32)
     feats_b = np.stack(all_fb).astype(np.float32)
-    g1 = np.array(all_g1, np.float64)
-    g2 = np.array(all_g2, np.float64)
+    s1a = np.array(all_s1, np.float64)
+    s2a = np.array(all_s2, np.float64)
     elapsed = perf_counter() - t0
     print(f"  {len(feats_a):,} samples  ({elapsed * 1000 / n_games:.2f} ms/game total)",
           flush=True)
-    return feats_a, feats_b, g1, g2
+    return feats_a, feats_b, s1a, s2a
 
 
 # ── Linear regression (ordinary least squares via numpy) ─────────────────────
@@ -279,7 +302,7 @@ def _ols(X: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, float, float]:
 
 def run_regression(
     feats_a: np.ndarray, feats_b: np.ndarray,
-    gap_n1: np.ndarray, gap_n2: np.ndarray,
+    score_n1: np.ndarray, score_n2: np.ndarray,
 ) -> list[RegressionResult]:
     results: list[RegressionResult] = []
     feat_names_a = (
@@ -299,10 +322,9 @@ def run_regression(
         ("A", feats_a, feat_names_a),
         ("B", feats_b, feat_names_b),
     ]:
-        for horizon_tag, gap in [("N+1", gap_n1), ("N+2", gap_n2)]:
-            # drop rows where gap is NaN (N+2 may have NaN entries)
-            mask = ~np.isnan(gap)
-            Xm, ym = X[mask], gap[mask]
+        for horizon_tag, yvec in [("N+1", score_n1), ("N+2", score_n2)]:
+            mask = ~np.isnan(yvec)
+            Xm, ym = X[mask], yvec[mask]
             if len(ym) < 10:
                 print(f"  [warn] model {model_tag} {horizon_tag}: "
                       f"only {len(ym)} valid rows — skip")
@@ -366,7 +388,7 @@ def plot_r2_summary(
         ax.text(bar.get_x() + bar.get_width() / 2, v + 0.0005,
                 f"{v:.4f}", ha="center", va="bottom", fontsize=9)
     ax.set_ylabel("R²", fontsize=10)
-    ax.set_title("R² by model and horizon (03-4 linear regression)", fontsize=10)
+    ax.set_title("R² — own next / next+1 match score (03-4)", fontsize=10)
     ax.set_ylim(0, max(r2s) * 1.15 + 0.01)
     ax.grid(axis="y", alpha=0.3)
     fig.tight_layout()
@@ -383,7 +405,7 @@ def write_log(
     n_games: int, n_players: int,
 ) -> None:
     lines = [
-        "=== 03-4  Linear regression on per-sum hand features ===",
+        "=== 03-4  Linear regression (targets = own next / next+1 *match* score) ===",
         f"Games: {n_games:,}  Players: {n_players}",
         "",
         f"{'Model':>7}  {'Horizon':>6}  {'n':>8}  {'R²':>8}  {'RMSE':>8}",
@@ -427,14 +449,14 @@ def main() -> None:
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Simulating {args.games:,} games ({args.n_players}p) …", flush=True)
-    feats_a, feats_b, g1, g2 = collect_samples(
+    feats_a, feats_b, s1, s2 = collect_samples(
         args.games, args.n_players, args.n_hand, args.seed,
     )
-    n2_ok = int(np.sum(~np.isnan(g2)))
-    print(f"  N+1 samples: {len(g1):,}   N+2 samples: {n2_ok:,}", flush=True)
+    n2_ok = int(np.sum(~np.isnan(s2)))
+    print(f"  N+1 rows: {len(s1):,}   N+2 rows: {n2_ok:,}", flush=True)
 
     print("Running regression …", flush=True)
-    results = run_regression(feats_a, feats_b, g1, g2)
+    results = run_regression(feats_a, feats_b, s1, s2)
 
     print("Plotting …", flush=True)
     plot_r2_summary(results, args.out_dir / "r2_summary.png")

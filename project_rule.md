@@ -23,3 +23,4 @@ Future simulations will refer to existing instructions. You may be instructed to
 You should always use ~/Documents/projects/venv as python virtual environment.
 You are allowed to execute the python scripts in place
 You are encouraged to commit frequenctly with meaningful messages. You should often use commit --amend to keep meaningful commits only
+You should keep the data file in artifacts/ folder to avoid resimulation each time.

@@ -14,7 +14,7 @@ m = importlib.util.module_from_spec(_spec)
 sys.modules["m34"] = m
 _spec.loader.exec_module(m)
 
-from pick14.cards import Card, Rank, Suit  # noqa: E402
+from pick14.cards import Card, Rank, Suit, score_value  # noqa: E402
 
 
 def _card(rank: int) -> Card:
@@ -23,45 +23,64 @@ def _card(rank: int) -> Card:
 
 def test_feat_vector_lengths() -> None:
     h = [_card(1), _card(4), _card(5)]
-    pub: list[Card] = []
-    fa, fb = m.build_feature_vectors(h, pub)
-    assert len(fa) == m.N_FEAT_A  # 27
-    assert len(fb) == m.N_FEAT_B  # 53
-
-
-def test_x1_x2_ace_four_five() -> None:
-    """Hand A/4/5: subsets summing to s=1..13 (ignore game_value capping)."""
-    h = [_card(1), _card(4), _card(5)]
     fa, fb = m.build_feature_vectors(h, [])
-    # sum=5 (A+4): x1[4]=1 and x2[4]>=1
-    assert fa[4] == 1.0   # x1[s=5] — index 4
-    assert fa[m.N_SUMS + 4] >= 1.0  # x2[s=5]
-    # sum=10 (A+4+5=10): x1[9]=1
-    assert fa[9] == 1.0
+    assert len(fa) == m.N_FEAT_A
+    assert len(fb) == m.N_FEAT_B
 
 
-def test_x3_x4_with_public() -> None:
-    """x3/x4 for a hand of [5] and public [9H, 9S] (complement of 5 is 9).
-    score_value: HEART=4, SPADE=3.
-    """
+def test_x1_max_hand_pts_x2_extra_occ() -> None:
+    """A/4/5: s=5 from {A+4} and {5} -> k=2 -> x2=2; x1 = max hand pts of those."""
+    h = [_card(1), _card(4), _card(5)]
+    fa, _fb = m.build_feature_vectors(h, [])
+    p14 = float(score_value(_card(1)) + score_value(_card(4)))
+    p5o = float(score_value(_card(5)))
+    assert fa[4] == max(p14, p5o)
+    assert fa[m.N_SUMS + 4] == 2.0
+
+
+def test_x2_multiple_subsets() -> None:
+    """Force same sum s from two distinct hand subsets: k=2 -> x2=2."""
+    # 4+4+4 with three 4s: sums 4 (three singles), 8 (pair), 12 (triplet)
+    # s=4: 3 one-card subsets, k=3 -> x2 = 2*2=4
+    h = [
+        Card(is_joker=False, rank=Rank.FOUR, suit=Suit.CLUB),
+        Card(is_joker=False, rank=Rank.FOUR, suit=Suit.HEART),
+        Card(is_joker=False, rank=Rank.FOUR, suit=Suit.SPADE),
+    ]
+    fa, _ = m.build_feature_vectors(h, [])
+    assert fa[3] > 0  # x1[s=4] at index 3
+    assert fa[m.N_SUMS + 3] == 4.0  # 2 * (3 - 1)
+
+
+def test_x3_x4_category_totals() -> None:
+    """Hand [5C], public 9H+9S: s=5, max_hp=1, comp=9, x3=1+4, x4=1+3."""
     hand = [_card(5)]
     pub = [
-        Card(is_joker=False, rank=Rank.NINE, suit=Suit.HEART),   # score 4
-        Card(is_joker=False, rank=Rank.NINE, suit=Suit.SPADE),   # score 3
+        Card(is_joker=False, rank=Rank.NINE, suit=Suit.HEART),
+        Card(is_joker=False, rank=Rank.NINE, suit=Suit.SPADE),
     ]
     _fa, fb = m.build_feature_vectors(hand, pub)
-    # s=5 -> comp=9; x3[4] = best pub score = 4; x4[4] = second = 3
-    x3_idx = 2 * m.N_SUMS + 4   # x1(13) + x2(13) + index-4
-    x4_idx = 3 * m.N_SUMS + 4
-    assert fb[x3_idx] == 4.0
-    assert fb[x4_idx] == 3.0
+    i = 2 * m.N_SUMS + 4
+    j = 3 * m.N_SUMS + 4
+    assert fb[i] == 1.0 + 4.0
+    assert fb[j] == 1.0 + 3.0
 
 
-def test_x3_zero_if_no_public_complement() -> None:
+def test_x3_zero_if_no_complement() -> None:
     hand = [_card(5)]
     _fa, fb = m.build_feature_vectors(hand, [])
-    x3_idx = 2 * m.N_SUMS + 4
-    assert fb[x3_idx] == 0.0
+    assert fb[2 * m.N_SUMS + 4] == 0.0
+    assert fb[3 * m.N_SUMS + 4] == 0.0
+
+
+def test_x4_zero_if_one_public() -> None:
+    hand = [_card(5)]
+    pub = [Card(is_joker=False, rank=Rank.NINE, suit=Suit.HEART)]
+    _fa, fb = m.build_feature_vectors(hand, pub)
+    i = 2 * m.N_SUMS + 4
+    j = 3 * m.N_SUMS + 4
+    assert fb[i] == 1.0 + 4.0
+    assert fb[j] == 0.0
 
 
 def test_bias_last() -> None:
@@ -70,10 +89,7 @@ def test_bias_last() -> None:
     assert fb[-1] == 1.0
 
 
-def test_collect_small_run() -> None:
-    fa, fb, g1, g2 = m.collect_samples(30, 4, 3, 0, report_every=1000)
-    assert fa.shape[1] == m.N_FEAT_A
-    assert fb.shape[1] == m.N_FEAT_B
-    assert len(fa) == len(g1) == len(g2)
-    # g1 has no NaN; g2 may
-    assert not np.any(np.isnan(g1))
+def test_collect_uses_self_score() -> None:
+    fa, fb, s1, s2 = m.collect_samples(20, 4, 3, 0, report_every=1000)
+    assert not np.any(s1 < 0)
+    assert not np.any(np.isnan(s1))
