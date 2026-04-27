@@ -77,8 +77,9 @@ def main() -> None:
     ms = (time.perf_counter() - t0) * 1000.0
     f = len(forks)
     sum_k = sum(b for _, b in forks)
-    clone_ref_ms = 36_000 / 200_000
-    est_clone_only = sum_k * clone_ref_ms
+    # 04 DFS: ~36 s / 200k nodes ≈ 0.18 ms per clone+child step (in ms)
+    ms_per_04_node = 36_000.0 / 200_000.0
+    est_clone_only = sum_k * ms_per_04_node
     print(
         f"{args.n_players}p  n_hand={args.n_hand}  seed={args.seed}  "
         f"explorer={args.explorer}\n"
@@ -86,7 +87,7 @@ def main() -> None:
         f"  F explorer forks: {f}\n"
         f"  sum K (branches to evaluate per fork, incl. stem): {sum_k}\n"
         f"  K*3 layer endpoints: {sum_k * 3}\n"
-        f"  naive add-on if only {sum_k} deep-clones @ ~{clone_ref_ms*1000:.2f} ms: "
+        f"  naive add-on if only {sum_k} deep-clones @ ~{ms_per_04_node:.2f} ms: "
         f"~{est_clone_only:.1f} ms  (~{(ms + est_clone_only)/ms if ms else 0:.1f}x vs stem, loose)",
     )
 
