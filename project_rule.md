@@ -40,4 +40,8 @@ Example (from SSH — use **absolute** paths so `cmd`/`python` resolve the scrip
 
 Or run **`scripts/gpu_pickq_train.cmd`** via `cmd.exe /c C:\Users\Administrator\Documents\projects\pick14\scripts\gpu_pickq_train.cmd` (wrapper embeds those paths).
 
+- **SSH default working directory:** OpenSSH often lands in `C:\Users\Administrator`, not the repo. If you pass **relative** paths such as `--output-dir rollout_data` or `--rollout-dir rollout_data`, **must** set cwd first, e.g.  
+  `cmd.exe /c "cd /d C:\Users\Administrator\Documents\projects\pick14 && …\python.exe" …\scripts\05_rollout_mass.py --output-dir rollout_data`  
+  (same pattern for `05_train_timed.py`). Otherwise shards or shard loads resolve to the wrong folder.
+
 You should always use git to synchronize towards and from the server, including artifacts like training checkpoints.
