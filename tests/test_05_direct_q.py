@@ -25,6 +25,7 @@ from pick14.rl.direct_q import (
     DecisionLog,
     DummyQNetwork,
     _enum_draw_outcomes,
+    choose_play_move_by_q,
     compute_action_values,
     decide,
     encode_end_of_round,
@@ -38,6 +39,8 @@ from pick14.rl.sim_core import (
     RlPick14State,
     TurnPhase,
     _legal_matches,
+    apply_pass_match,
+    legal_play_moves,
     new_game,
     total_score_points,
 )
@@ -357,3 +360,20 @@ class TestDecide:
         captured = capsys.readouterr()
         assert "Player" in captured.out
         assert "Chosen" in captured.out
+
+
+class TestChoosePlayMoveByQ:
+    def test_play_phase_argmax_aligned_with_monotonic_preferences(self):
+        """Later plays in enumeration order get higher Q → pick last legal play."""
+
+        class MonotonicQ:
+            def evaluate_batch(self, states, acting_player):  # noqa: ANN001
+                return [float(i) for i in range(len(states))]
+
+        state = new_game(2, rng=Random(42))
+        apply_pass_match(state)
+        assert state.phase == TurnPhase.PLAY
+        plays = legal_play_moves(state)
+        assert plays
+        chosen = choose_play_move_by_q(state, MonotonicQ(), 0)
+        assert chosen.hand_index == plays[-1].hand_index

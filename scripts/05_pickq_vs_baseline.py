@@ -6,7 +6,7 @@ Uses pick14.rl.direct_q.decide + PickQNet + encode_q_state + rolling GameHistory
 inference wiring as scripts/05_cp6_quality.py (trained checkpoint from disk; no inline training).
 
 Baseline turn = greedy_stingy_match then greedy_stingy_play (rl.md §1.5).
-Q-agent turn after MatchMove uses greedy_stingy_play for the forced PLAY step (same as CP6).
+After a scoring PickQ MatchMove, PLAY uses argmax Q via ``choose_play_move_by_q`` (same rule as inside match projections).
 
 Trace mode (--trace-one-game): run a single game and print each MATCH situation — Q options
 (immediate_pts, projected_q, combined), greedy decision; baseline mirror policy description.
@@ -25,7 +25,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from pick14.cards import format_card
-from pick14.rl.direct_q import decide
+from pick14.rl.direct_q import choose_play_move_by_q, decide
 from pick14.rl.q_model import PickQNet
 from pick14.rl.q_state import GameHistory, TurnRecord, encode_q_state
 from pick14.rl.sim_core import (
@@ -70,8 +70,15 @@ class TrainedQAdapter:
         return [float(v) for v in q.squeeze(-1).cpu().tolist()]
 
 
-def apply_first_level_action(state, action: PlayMove | MatchMove, q_seat: int) -> None:
-    """Apply PickQ choice at MATCH; stingy PLAY after match matches rollout scripts."""
+def apply_first_level_action(
+    state,
+    action: PlayMove | MatchMove,
+    adapter: TrainedQAdapter,
+    q_seat: int,
+    *,
+    log_play: bool = False,
+) -> None:
+    """Apply PickQ MATCH-phase choice; PLAY after match uses argmax Q over legal discards."""
     assert state.phase == TurnPhase.MATCH
     assert state.current_player == q_seat
     if isinstance(action, PlayMove):
@@ -80,13 +87,23 @@ def apply_first_level_action(state, action: PlayMove | MatchMove, q_seat: int) -
     elif isinstance(action, MatchMove):
         apply_match(state, action.public_index, action.hand_indices, immediate_draw=True)
         if state.phase == TurnPhase.PLAY:
-            apply_play(state, greedy_stingy_play(state).hand_index, immediate_draw=True)
+            pm = choose_play_move_by_q(state, adapter, q_seat)
+            if log_play:
+                pc = state.hands[q_seat][pm.hand_index]
+                print(
+                    "  --- PLAY phase (realized refill): argmax Q over legal discards ---"
+                )
+                print(
+                    f"  PickQ PLAY: hand[{pm.hand_index}] → discard "
+                    f"{format_card(pc).strip()}"
+                )
+            apply_play(state, pm.hand_index, immediate_draw=True)
     else:
         raise RuntimeError(f"unexpected action type from decide: {type(action)}")
 
 
 def apply_q_turn(state, adapter: TrainedQAdapter, acting_player: int) -> None:
-    """direct_q.decide at MATCH; forced PLAY after match uses greedy_stingy_play."""
+    """direct_q.decide at MATCH; PLAY after match uses choose_play_move_by_q."""
     action, _ = decide(
         state,
         adapter,
@@ -95,7 +112,7 @@ def apply_q_turn(state, adapter: TrainedQAdapter, acting_player: int) -> None:
         greedy=True,
         max_match_branches=8,
     )
-    apply_first_level_action(state, action, acting_player)
+    apply_first_level_action(state, action, adapter, acting_player)
 
 
 def apply_greedy_stingy_turn(state) -> None:
@@ -216,7 +233,7 @@ def run_traced_game(
                 f"  Decision: #{log.chosen_idx}  imm={chosen.immediate_pts}  "
                 f"proj_Q={chosen.projected_q:+.4f}  combined={chosen.combined:+.4f}"
             )
-            apply_first_level_action(state, action, q_seat)
+            apply_first_level_action(state, action, adapter, q_seat, log_play=True)
         else:
             print("  Baseline policy (same engine as apply_greedy_stingy_turn), preview on clone:")
             for line in _describe_baseline_intended(state):

@@ -24,7 +24,7 @@ import numpy as np
 import torch
 
 from pick14.cards import format_card
-from pick14.rl.direct_q import DummyQNetwork, decide
+from pick14.rl.direct_q import DummyQNetwork, choose_play_move_by_q, decide
 from pick14.rl.q_model import PickQNet
 from pick14.rl.q_state import GameHistory, TurnRecord, encode_q_state
 from pick14.rl.q_targets import backfill_targets, rollout_game
@@ -106,7 +106,7 @@ def play_one_game(
             elif isinstance(action, MatchMove):
                 apply_match(state, action.public_index, action.hand_indices, immediate_draw=True)
                 if state.phase == TurnPhase.PLAY:
-                    play = greedy_stingy_play(state)
+                    play = choose_play_move_by_q(state, q_adapter, acting_player=0)
                     apply_play(state, play.hand_index, immediate_draw=True)
         else:
             # Greedy agent's turn

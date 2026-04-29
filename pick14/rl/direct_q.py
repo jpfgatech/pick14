@@ -18,7 +18,7 @@ Pass & play path::
 Match path::
 
     [init] ──match──▶ DRAW1 ──draw to M+1──▶ PLAY ──play card j──▶ [end-of-round]
-                              (random)              (best j)
+                              (random)              (best j by Q at inference)
 
 Q-network input
 ~~~~~~~~~~~~~~~
@@ -35,6 +35,8 @@ Decision procedure (see :func:`decide`)
    average best-Q over branches + add immediate match score → action value.
 3. Softmax over action values with temperature ``tau`` → probabilities.
 4. Optionally log the whole table.
+5. After a real match and draw, at ``TurnPhase.PLAY``, call :func:`choose_play_move_by_q`
+   to pick the discard (argmax Q) — same rule as the inner max in step 2.
 """
 
 from __future__ import annotations
@@ -314,6 +316,35 @@ def project_match(
         bundles.append(bundle)
 
     return bundles
+
+
+def choose_play_move_by_q(
+    state: RlPick14State,
+    q_net: QNetwork,
+    acting_player: int,
+) -> PlayMove:
+    """
+    At ``TurnPhase.PLAY``, choose the discard that **maximizes** Q on the resulting
+    end-of-round states.
+
+    Matches the inner loop of :func:`project_match` (``max`` over legal plays on the
+    realized Draw1 branch). Call after the engine has applied the scoring match and
+    resolved draws so ``state`` reflects one concrete refill.
+    """
+    assert state.phase == TurnPhase.PLAY, "choose_play_move_by_q requires PLAY phase"
+    plays = legal_play_moves(state)
+    if not plays:
+        raise RuntimeError("choose_play_move_by_q: no legal PLAY moves")
+
+    end_states: list[RlPick14State] = []
+    for pm in plays:
+        b = clone_state(state)
+        apply_play(b, pm.hand_index, immediate_draw=True)
+        end_states.append(b)
+
+    qs = q_net.evaluate_batch(end_states, acting_player)
+    best_i = int(np.argmax(qs))
+    return plays[best_i]
 
 
 # ---------------------------------------------------------------------------

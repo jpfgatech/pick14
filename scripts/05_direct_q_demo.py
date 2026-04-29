@@ -28,6 +28,7 @@ from pick14.cards import format_card, game_value, score_value
 from pick14.rl.direct_q import (
     FEATURE_DIM,
     DummyQNetwork,
+    choose_play_move_by_q,
     compute_action_values,
     decide,
     encode_end_of_round,
@@ -190,18 +191,19 @@ def run_demo(n_players: int = 2, n_turns: int = 3, seed: int = 42) -> None:
 
         # Apply the chosen action to advance the game.
         # decide() always returns a PlayMove (pass+play) or MatchMove.
-        # After a MatchMove, state will be at PLAY — apply a greedy sub-play.
+        # After a MatchMove, state will be at PLAY — discard by argmax Q (see choose_play_move_by_q).
         if isinstance(action, PlayMove):
             # Pass+play compound: apply pass then the chosen play card.
             from pick14.rl.sim_core import apply_pass_match, apply_play
             apply_pass_match(state)
             apply_play(state, action.hand_index, immediate_draw=True)
         elif isinstance(action, MatchMove):
-            from pick14.rl.sim_core import apply_match, apply_play, greedy_stingy_play
+            from pick14.rl.sim_core import apply_match, apply_play
+
             apply_match(state, action.public_index, action.hand_indices, immediate_draw=True)
-            # After match, engine is at PLAY (forced discard from refilled hand).
+            # After match, engine is at PLAY — PickQ chooses discard by argmax Q (same as projections).
             if state.phase == TurnPhase.PLAY:
-                sub_play = greedy_stingy_play(state)
+                sub_play = choose_play_move_by_q(state, q_net, acting_player=p)
                 apply_play(state, sub_play.hand_index, immediate_draw=True)
         else:
             raise RuntimeError(f"Unexpected action type: {type(action)}")
