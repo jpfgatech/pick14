@@ -15,9 +15,15 @@ if [[ ! -d "${ROOT}/.git" ]]; then
   exit 1
 fi
 
-git fetch origin
-git checkout evolve-play-strategy
-git pull origin evolve-play-strategy
+# When GitHub HTTPS/SSH is blocked on this host, sync via `git bundle` from your laptop
+# and set PICK14_SKIP_GIT_SYNC=1 so this script skips fetch/pull.
+if [[ "${PICK14_SKIP_GIT_SYNC:-}" != "1" ]]; then
+  git fetch origin
+  git checkout evolve-play-strategy
+  git pull origin evolve-play-strategy
+else
+  git checkout evolve-play-strategy
+fi
 
 PYTHON="${ROOT}/../venv/Scripts/python.exe"
 if [[ ! -f "${PYTHON}" ]]; then
