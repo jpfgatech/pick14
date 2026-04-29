@@ -104,6 +104,7 @@ from pick14.rl.q_targets import (
     rollout_game,
 )
 from pick14.rl.q_train import (
+    global_val_opp_bce,
     global_val_q_mse,
     load_rollout_shards_numpy,
     samples_to_tensors,
@@ -193,8 +194,14 @@ def main() -> None:
     p.add_argument(
         "--log-every",
         type=int,
-        default=25,
-        help="Print progress every N epochs",
+        default=1,
+        help="Print progress every N epochs (1 = each epoch)",
+    )
+    p.add_argument(
+        "--opp-weight",
+        type=float,
+        default=0.1,
+        help="Weight on opponent-hand BCE in the combined training loss",
     )
     p.add_argument(
         "--out-dir",
@@ -316,10 +323,6 @@ def main() -> None:
     model = PickQNet().to(device)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
 
-    train_epoch(model, x_tr, qt_tr, opp_tr, opt, batch_size=args.batch)
-    if device.type == "cuda":
-        torch.cuda.synchronize()
-
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -329,6 +332,8 @@ def main() -> None:
     epoch = 0
     train_losses: list[float] = []
     val_losses: list[float] = []
+    train_opp_losses: list[float] = []
+    val_opp_losses: list[float] = []
     wall_start = time.perf_counter()
     stop_reason = "max_epochs"
     budget_s = args.max_minutes * 60.0 if args.max_minutes > 0 else None
@@ -354,13 +359,24 @@ def main() -> None:
             stop_reason = "max_minutes"
             break
 
-        stats = train_epoch(model, x_tr, qt_tr, opp_tr, opt, batch_size=args.batch)
+        stats = train_epoch(
+            model,
+            x_tr,
+            qt_tr,
+            opp_tr,
+            opt,
+            batch_size=args.batch,
+            opp_weight=args.opp_weight,
+        )
         epoch += 1
         train_losses.append(stats["q_loss"])
+        train_opp_losses.append(stats["opp_loss"])
 
         model.eval()
         val_q = global_val_q_mse(model, x_va, qt_va, microbatch=args.val_batch)
+        val_opp = global_val_opp_bce(model, x_va, opp_va, microbatch=args.val_batch)
         val_losses.append(val_q)
+        val_opp_losses.append(val_opp)
         model.train()
         if device.type == "cuda":
             torch.cuda.synchronize()
@@ -375,7 +391,9 @@ def main() -> None:
             print(
                 f"  Stability reached at epoch={epoch}: val_cv={cv:.5f} < {args.stable_rel} "
                 f"(tr_q={stats['q_loss']:.4f} tr_rmse={math.sqrt(max(0.0, stats['q_loss'])):.4f} "
-                f"val_q={val_q:.4f} val_rmse={math.sqrt(max(0.0, val_q)):.4f})",
+                f"tr_opp={stats['opp_loss']:.4f} "
+                f"val_q={val_q:.4f} val_rmse={math.sqrt(max(0.0, val_q)):.4f} "
+                f"val_opp={val_opp:.4f})",
                 flush=True,
             )
             break
@@ -386,8 +404,11 @@ def main() -> None:
             tr_rmse = math.sqrt(max(0.0, stats["q_loss"]))
             val_rmse = math.sqrt(max(0.0, val_q))
             print(
-                f"  {elapsed:6.1f}s  epoch={epoch:5d}  tr_q={stats['q_loss']:.4f}  "
-                f"tr_rmse={tr_rmse:.4f}  val_q={val_q:.4f}  val_rmse={val_rmse:.4f}  "
+                f"  {elapsed:6.1f}s  epoch={epoch:5d}  "
+                f"tr_q={stats['q_loss']:.4f}  tr_rmse={tr_rmse:.4f}  "
+                f"tr_opp={stats['opp_loss']:.4f}  "
+                f"val_q={val_q:.4f}  val_rmse={val_rmse:.4f}  "
+                f"val_opp={val_opp:.4f}  "
                 f"val_cv={cv_s}",
                 flush=True,
             )
@@ -406,6 +427,7 @@ def main() -> None:
         "gamma": GAMMA,
         "q_horizon_turns": Q_TARGET_HORIZON_TURNS,
         "q_target_spec": "future_only_gap_horizon",
+        "opp_weight": args.opp_weight,
     }
     if rollout_from_disk:
         assert rollout_dir_resolved is not None
@@ -430,11 +452,14 @@ def main() -> None:
         "min_epochs": args.min_epochs,
         "max_epochs": args.max_epochs,
         "max_minutes": args.max_minutes,
+        "opp_weight": args.opp_weight,
         "samples": int(n),
         "train_samples": int(split),
         "val_samples": int(n - split),
         "final_train_q_loss": train_losses[-1] if train_losses else None,
         "final_val_q_loss": val_losses[-1] if val_losses else None,
+        "final_train_opp_loss": train_opp_losses[-1] if train_opp_losses else None,
+        "final_val_opp_loss": val_opp_losses[-1] if val_opp_losses else None,
         "final_train_rmse": math.sqrt(max(0.0, train_losses[-1])) if train_losses else None,
         "final_val_rmse": math.sqrt(max(0.0, val_losses[-1])) if val_losses else None,
         "final_val_cv": _val_cv(val_losses, args.stable_window),

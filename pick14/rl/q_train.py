@@ -119,6 +119,33 @@ def global_val_q_mse(
     return total / float(n)
 
 
+def global_val_opp_bce(
+    model: nn.Module,
+    x_va: torch.Tensor,
+    opp_va: torch.Tensor,
+    microbatch: int = 8192,
+) -> float:
+    """
+    Global validation mean BCE for the opponent-hand head:
+
+        mean_j BCE( sigmoid(opp_pred_j), opp_va_j )
+
+    Same reduction semantics as per-batch ``train_epoch`` opponent loss (mean over batch),
+    aggregated globally over validation rows via sum/N.
+    """
+    model.eval()
+    compute_dev = next(model.parameters()).device
+    n = x_va.shape[0]
+    total = 0.0
+    with torch.no_grad():
+        for start in range(0, n, microbatch):
+            xb = x_va[start:start + microbatch].to(compute_dev, non_blocking=True)
+            ob = opp_va[start:start + microbatch].to(compute_dev, non_blocking=True)
+            _, opp_pred = model(xb)
+            total += nn.BCELoss(reduction="sum")(opp_pred, ob).item()
+    return total / float(n)
+
+
 def train_epoch(
     model: nn.Module,
     x: torch.Tensor,
