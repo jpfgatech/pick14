@@ -130,8 +130,8 @@ def global_val_opp_bce(
 
         mean_j BCE( sigmoid(opp_pred_j), opp_va_j )
 
-    Same reduction semantics as per-batch ``train_epoch`` opponent loss (mean over batch),
-    aggregated globally over validation rows via sum/N.
+    Same reduction semantics as per-batch ``train_epoch`` opponent loss: global mean over
+    all (sample × card) entries, ``sum(reduction='sum') / numel``.
     """
     model.eval()
     compute_dev = next(model.parameters()).device
@@ -143,7 +143,8 @@ def global_val_opp_bce(
             ob = opp_va[start:start + microbatch].to(compute_dev, non_blocking=True)
             _, opp_pred = model(xb)
             total += nn.BCELoss(reduction="sum")(opp_pred, ob).item()
-    return total / float(n)
+    # Mean over all (sample × card) entries; must match train_epoch batch means.
+    return total / float(opp_va.numel())
 
 
 def train_epoch(

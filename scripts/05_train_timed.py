@@ -20,7 +20,7 @@ Definitions (precise)
 
 Each ``TurnSample`` has scalar ``q_target``: instruction-aligned discounted gaps per
 ``instructions/05-1.md`` — ``Σ_{r=0}^{R-1} γ^r · GAP_{r+1}(j)`` where each ``GAP``
-pairs consecutive scoring rows ``(j+2r,\, j+2r+1)`` with time-ordered pile deltas
+pairs consecutive scoring rows ``(j+2r, j+2r+1)`` with time-ordered pile deltas
 ``(a,b)`` and ``GAP = b − (a+b)/2``. Default γ = 0.9 and ``R = Q_TARGET_HORIZON_ROUNDS``
 (typically **2**, **GAP1** undiscounted). The actor-centric chronological ``gap[j]``
 (:func:`~pick14.rl.q_targets.chrono_normalized_turn_gaps`) is **diagnostic**, not ``qt``.

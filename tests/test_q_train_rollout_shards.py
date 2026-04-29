@@ -6,8 +6,10 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import torch
+import torch.nn as nn
 
-from pick14.rl.q_train import load_rollout_shards_numpy
+from pick14.rl.q_train import global_val_opp_bce, load_rollout_shards_numpy
 
 
 def test_load_rollout_shards_concat_and_fp16(tmp_path: Path) -> None:
@@ -53,3 +55,29 @@ def test_load_rollout_shards_load_segment(tmp_path: Path) -> None:
     assert xo2.shape == (2, 54, 27)
     assert sg.shape == (2,) and sg.dtype == np.uint8
     assert np.array_equal(sg, seg)
+
+
+def test_global_val_opp_bce_matches_full_batch_mean() -> None:
+    """Validation opp BCE must average over all (sample × card), not divide only by N."""
+    torch.manual_seed(0)
+    n = 31
+    x = torch.randn(n, 54, 27)
+    opp = torch.randint(0, 2, (n, 54)).float()
+
+    class Stub(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.w = nn.Parameter(torch.ones(1))
+
+        def forward(self, xb: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+            b = xb.shape[0]
+            probs = torch.sigmoid(xb.mean(dim=(1, 2))).unsqueeze(1).expand(b, 54).clamp(
+                1e-6, 1 - 1e-6
+            )
+            return torch.zeros(b, 1, device=xb.device, dtype=xb.dtype), probs
+
+    m = Stub()
+    _, opp_pred_full = m(x)
+    ref = nn.BCELoss()(opp_pred_full, opp).item()
+    got = global_val_opp_bce(m, x, opp, microbatch=7)
+    assert abs(ref - got) < 1e-5
