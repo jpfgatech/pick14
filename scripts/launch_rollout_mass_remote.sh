@@ -1,22 +1,20 @@
 #!/usr/bin/env bash
-# Launch scripts/run_rollout_mass_remote.bat on the Windows GPU box via SSH.
+# Launch Git Bash on the Windows GPU box and run mass rollout (git pull + python).
 #
-# Prerequisites:
-#   - Repo synced on server (git pull / matching branch).
-#   - Windows OpenSSH with Administrator login.
-#
-# The rollout runs for a long time; keep this SSH session open or run ssh from tmux/screen.
+# Requires:
+#   - Repo at ~/Documents/projects/pick14 with .git (clone evolve-play-strategy).
+#   - Git for Windows (bash.exe).
 #
 # Usage:
-#   export PICK14_REMOTE_HOST=your.windows.host   # hostname or IP
+#   export PICK14_REMOTE_HOST=your.windows.host
 #   optional: export PICK14_REMOTE_USER=Administrator
 #   ./scripts/launch_rollout_mass_remote.sh
 
 set -euo pipefail
 
-# Default GPU server — see project_rule.md (override with PICK14_REMOTE_HOST).
 HOST="${PICK14_REMOTE_HOST:-100.74.144.124}"
 USER="${PICK14_REMOTE_USER:-administrator}"
 
-echo "SSH ${USER}@${HOST} → run_rollout_mass_remote.bat"
-ssh "${USER}@${HOST}" 'cmd.exe /c "C:\Users\Administrator\Documents\projects\pick14\scripts\run_rollout_mass_remote.bat"'
+echo "SSH ${USER}@${HOST} → Git Bash → scripts/run_rollout_mass_remote_gitbash.sh"
+# shellcheck disable=SC2029
+ssh "${USER}@${HOST}" '"C:/Program Files/Git/bin/bash.exe" -lc "cd /c/Users/Administrator/Documents/projects/pick14 && exec bash scripts/run_rollout_mass_remote_gitbash.sh"'
