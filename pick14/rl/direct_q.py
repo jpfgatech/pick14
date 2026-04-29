@@ -318,6 +318,33 @@ def project_match(
     return bundles
 
 
+def enumerate_play_q_values(
+    state: RlPick14State,
+    q_net: QNetwork,
+    acting_player: int,
+) -> list[tuple[PlayMove, float]]:
+    """
+    At ``TurnPhase.PLAY``, evaluate PickQ on every legal discard's **end-of-round**
+    successor state.
+
+    Returns ``(PlayMove, q)`` pairs in ``legal_play_moves`` order — same ordering as
+    :func:`choose_play_move_by_q` uses for ``argmax``.
+    """
+    assert state.phase == TurnPhase.PLAY, "enumerate_play_q_values requires PLAY phase"
+    plays = legal_play_moves(state)
+    if not plays:
+        raise RuntimeError("enumerate_play_q_values: no legal PLAY moves")
+
+    end_states: list[RlPick14State] = []
+    for pm in plays:
+        b = clone_state(state)
+        apply_play(b, pm.hand_index, immediate_draw=True)
+        end_states.append(b)
+
+    qs = q_net.evaluate_batch(end_states, acting_player)
+    return list(zip(plays, qs, strict=True))
+
+
 def choose_play_move_by_q(
     state: RlPick14State,
     q_net: QNetwork,
@@ -331,20 +358,10 @@ def choose_play_move_by_q(
     realized Draw1 branch). Call after the engine has applied the scoring match and
     resolved draws so ``state`` reflects one concrete refill.
     """
-    assert state.phase == TurnPhase.PLAY, "choose_play_move_by_q requires PLAY phase"
-    plays = legal_play_moves(state)
-    if not plays:
-        raise RuntimeError("choose_play_move_by_q: no legal PLAY moves")
-
-    end_states: list[RlPick14State] = []
-    for pm in plays:
-        b = clone_state(state)
-        apply_play(b, pm.hand_index, immediate_draw=True)
-        end_states.append(b)
-
-    qs = q_net.evaluate_batch(end_states, acting_player)
-    best_i = int(np.argmax(qs))
-    return plays[best_i]
+    pairs = enumerate_play_q_values(state, q_net, acting_player)
+    qs_list = [q for _, q in pairs]
+    best_i = int(np.argmax(qs_list))
+    return pairs[best_i][0]
 
 
 # ---------------------------------------------------------------------------

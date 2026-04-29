@@ -476,7 +476,11 @@ def try_plot_pass_play(
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--checkpoint", type=str, default="train_runs/pickq_20260429T020300Z.pt")
+    ap.add_argument(
+        "--checkpoint",
+        type=str,
+        default="train_runs/pickq_20260429T053625Z.pt",
+    )
     ap.add_argument("--device", type=str, default="cpu")
     ap.add_argument("--match-trials", type=int, default=8)
     ap.add_argument("--match-seed", type=int, default=20260429)

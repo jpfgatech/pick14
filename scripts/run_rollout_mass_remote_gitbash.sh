@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# Run from **Git Bash** on Windows (not cmd/PowerShell).
+# Run from **Git Bash** on the Windows GPU box (not cmd/PowerShell).
 # Repo root = parent of this file; venv = sibling ../venv (pick14-project layout).
+#
+# Pipeline: git pull → 20k stem-only (branch-free) mass rollout → 40-epoch timed Q training
+# on the generated shards. Checkpoints under train_runs_remote/; CUDA used when available.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -22,19 +25,44 @@ if [[ ! -f "${PYTHON}" ]]; then
   exit 1
 fi
 
-LOG="${ROOT}/rollout_mass_80k.log"
+SESSION_LOG="${ROOT}/rollout_train_20k_40ep.log"
+OUTPUT_ROLL="rollout_data_20k"
+
 ts() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
-echo "[$(ts)] Starting rollout_mass (10k games, stem greedy–stingy)" >> "${LOG}"
+echo "[$(ts)] Starting session log" >> "${SESSION_LOG}"
+
+echo "[$(ts)] === 20k stem rollout (branch-free) → ${OUTPUT_ROLL} ===" >> "${SESSION_LOG}"
 set +e
 "${PYTHON}" -u "${ROOT}/scripts/05_rollout_mass.py" \
-  --deck-configs 10000 \
+  --deck-configs 20000 \
   --reps-per-deck 1 \
-  --max-games 10000 \
+  --max-games 20000 \
   --shard-every-games 500 \
-  --output-dir rollout_data \
+  --output-dir "${OUTPUT_ROLL}" \
   --clear-output-dir \
-  >> "${LOG}" 2>&1
+  >> "${SESSION_LOG}" 2>&1
 ec=$?
 set -e
-echo "[$(ts)] Finished rollout_mass exit=${ec}" >> "${LOG}"
-exit "${ec}"
+echo "[$(ts)] rollout_mass exit=${ec}" >> "${SESSION_LOG}"
+if [[ "${ec}" -ne 0 ]]; then
+  exit "${ec}"
+fi
+
+mkdir -p "${ROOT}/train_runs_remote"
+echo "[$(ts)] === 40-epoch PickQ train (rollout-dir ${OUTPUT_ROLL}) ===" >> "${SESSION_LOG}"
+set +e
+"${PYTHON}" -u "${ROOT}/scripts/05_train_timed.py" \
+  --rollout-dir "${OUTPUT_ROLL}" \
+  --epochs 40 \
+  --batch 64 \
+  --lr 1e-3 \
+  --seed 1 \
+  --log-every 5 \
+  --opp-weight 0.1 \
+  --out-dir train_runs_remote \
+  --log-file train_runs_remote/train_pickq_20k_40ep.log \
+  >> "${SESSION_LOG}" 2>&1
+ec2=$?
+set -e
+echo "[$(ts)] train_timed exit=${ec2}" >> "${SESSION_LOG}"
+exit "${ec2}"

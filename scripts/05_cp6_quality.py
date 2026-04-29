@@ -29,6 +29,7 @@ from pick14.rl.q_model import PickQNet
 from pick14.rl.q_state import GameHistory, TurnRecord, encode_q_state
 from pick14.rl.q_targets import backfill_targets, rollout_game
 from pick14.rl.q_train import samples_to_tensors, train_epoch
+from pick14.rl.trained_q_adapter import TrainedQAdapter
 from pick14.rl.sim_core import (
     MatchMove,
     PlayMove,
@@ -44,38 +45,6 @@ from pick14.rl.sim_core import (
 )
 
 
-# ---------------------------------------------------------------------------
-# Q-network adapter for decide()
-# ---------------------------------------------------------------------------
-
-class TrainedQAdapter:
-    """
-    Wraps a trained PickQNet so it can be passed to direct_q.decide().
-
-    decide() calls evaluate(state, acting_player) with an RlPick14State.
-    We convert it to a 54×27 tensor using the current game history.
-    """
-
-    def __init__(self, model: PickQNet, history: GameHistory) -> None:
-        self.model = model
-        self.history = history
-
-    def evaluate(self, state, acting_player: int) -> float:
-        tensor = encode_q_state(state, agent_seat=acting_player, history=self.history)
-        x = torch.from_numpy(tensor).unsqueeze(0).float()  # (1, 54, 27)
-        self.model.eval()
-        with torch.no_grad():
-            q, _ = self.model(x)
-        return float(q.item())
-
-    def evaluate_batch(self, states, acting_player: int) -> list[float]:
-        return [self.evaluate(s, acting_player) for s in states]
-
-
-# ---------------------------------------------------------------------------
-# Play one game: Q-agent (seat 0) vs greedy (seat 1)
-# ---------------------------------------------------------------------------
-
 def play_one_game(
     model: PickQNet,
     rng: Random,
@@ -87,7 +56,7 @@ def play_one_game(
     """
     state = new_game(2, rng=rng)
     history = GameHistory(n_seats=2)
-    q_adapter = TrainedQAdapter(model, history)
+    q_adapter = TrainedQAdapter(model, history, torch.device("cpu"))
 
     while not is_finished(state):
         p = state.current_player

@@ -29,6 +29,7 @@ from pick14.rl.direct_q import (
     compute_action_values,
     decide,
     encode_end_of_round,
+    enumerate_play_q_values,
     project_match,
     project_pass_play,
 )
@@ -375,5 +376,8 @@ class TestChoosePlayMoveByQ:
         assert state.phase == TurnPhase.PLAY
         plays = legal_play_moves(state)
         assert plays
+        qn = MonotonicQ()
+        pairs = enumerate_play_q_values(state, qn, 0)
+        assert len(pairs) == len(plays)
         chosen = choose_play_move_by_q(state, MonotonicQ(), 0)
         assert chosen.hand_index == plays[-1].hand_index
