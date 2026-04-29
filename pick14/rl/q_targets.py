@@ -30,6 +30,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from random import Random
+from typing import Any
 
 import numpy as np
 
@@ -45,14 +46,27 @@ from pick14.rl.sim_core import (
     apply_match,
     apply_pass_match,
     apply_play,
-    clone_state,
     greedy_stingy_play,
     is_finished,
+    legal_moves,
+    legal_play_moves,
     new_game,
     total_score_points,
 )
 
 GAMMA = 0.9  # discount factor from instructions
+
+
+def exploration_rng_for_deck_rep(deck_seed: int, rep: int) -> Random:
+    """
+    Deterministic :class:`~random.Random` stream for exploration draws given a
+    deck configuration seed and repetition index (used by mass rollout).
+
+    Uses a fixed mixing function so ``rep ∈ [0, 8)`` produces disjoint streams for
+    the same ``deck_seed``.
+    """
+    mixed = (deck_seed * 1_000_003 + rep * 917_521) % (1 << 31)
+    return Random(mixed if mixed > 0 else 1)
 
 
 # ---------------------------------------------------------------------------
@@ -94,33 +108,84 @@ class TurnSample:
 # Policy helpers
 # ---------------------------------------------------------------------------
 
-def _apply_greedy_turn(state: RlPick14State) -> int:
+def _baseline_match_move(state: RlPick14State) -> MatchMove | PassMatch:
+    """Greedy capture selection on MATCH phase (same tie-breaking as legacy rollout)."""
+    matches = _legal_matches(state)
+    if not matches:
+        return PassMatch()
+    p = state.current_player
+    best = max(
+        matches,
+        key=lambda m: score_value(state.public[m.public_index])
+        + sum(score_value(state.hands[p][i]) for i in m.hand_indices),
+    )
+    return best
+
+
+def _pick_or_explore(
+    legal: list[Any],
+    greedy: Any,
+    rng: Random,
+    explore_frac: float,
+) -> Any:
     """
-    Apply the greedy-stingy policy for one full turn (match or pass+play).
-    Returns the score delta (points gained this turn).
+    With probability ``explore_frac``, choose uniformly among ``legal``;
+    otherwise return ``greedy``. Overlap between random pick and greedy is allowed.
+    """
+    if explore_frac <= 0 or not legal:
+        return greedy
+    if rng.random() < explore_frac:
+        return legal[rng.randrange(len(legal))]
+    return greedy
+
+
+def _apply_policy_turn(
+    state: RlPick14State,
+    rng: Random,
+    explore_frac: float,
+) -> int:
+    """
+    One full turn starting at MATCH.
+
+    Two independent exploration draws when ``explore_frac > 0``: one at MATCH,
+    one at PLAY (after match or pass).
+    Returns score delta for current player this turn.
     """
     assert state.phase == TurnPhase.MATCH
     p = state.current_player
     score_before = total_score_points(state, p)
 
-    matches = _legal_matches(state)
-    if matches:
-        # Pick the match with highest immediate score gain.
-        best = max(
-            matches,
-            key=lambda m: score_value(state.public[m.public_index])
-            + sum(score_value(state.hands[p][i]) for i in m.hand_indices),
-        )
-        apply_match(state, best.public_index, best.hand_indices, immediate_draw=True)
-        if state.phase == TurnPhase.PLAY:
-            play = greedy_stingy_play(state)
-            apply_play(state, play.hand_index, immediate_draw=True)
-    else:
+    legal_match_phase = legal_moves(state)
+    greedy_match = _baseline_match_move(state)
+    chosen_match = _pick_or_explore(legal_match_phase, greedy_match, rng, explore_frac)
+
+    if isinstance(chosen_match, PassMatch):
         apply_pass_match(state)
-        play = greedy_stingy_play(state)
-        apply_play(state, play.hand_index, immediate_draw=True)
+        lp = legal_play_moves(state)
+        gp = greedy_stingy_play(state)
+        cp = _pick_or_explore(lp, gp, rng, explore_frac)
+        apply_play(state, cp.hand_index, immediate_draw=True)
+    elif isinstance(chosen_match, MatchMove):
+        apply_match(
+            state,
+            chosen_match.public_index,
+            chosen_match.hand_indices,
+            immediate_draw=True,
+        )
+        if state.phase == TurnPhase.PLAY:
+            lp = legal_play_moves(state)
+            gp = greedy_stingy_play(state)
+            cp = _pick_or_explore(lp, gp, rng, explore_frac)
+            apply_play(state, cp.hand_index, immediate_draw=True)
+    else:
+        raise RuntimeError(f"unexpected MATCH-phase move type {type(chosen_match)}")
 
     return total_score_points(state, p) - score_before
+
+
+def _apply_greedy_turn(state: RlPick14State) -> int:
+    """Pure greedy baseline (no exploration). Same behaviour as ``explore_frac=0``."""
+    return _apply_policy_turn(state, Random(0), 0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -129,25 +194,46 @@ def _apply_greedy_turn(state: RlPick14State) -> int:
 
 def rollout_game(
     rng: Random | None = None,
+    *,
+    exploration_rng: Random | None = None,
+    explore_frac: float = 0.0,
     n_hand: int = 3,
     policy: str = "greedy",
 ) -> list[TurnSample]:
     """
     Play one full 2-player game and return a list of :class:`TurnSample`
-    objects, one per player per turn (before :func:`backfill_targets` is
-    called, ``q_target`` is set to 0.0 as a placeholder).
-
-    The samples are returned in turn order (player 0 turn 0, player 1 turn 0,
-    player 0 turn 1, …).
+    objects, one per player per turn.
 
     Parameters
     ----------
-    rng : Random | None
-        Source of randomness; fresh one created if omitted.
-    policy : str
-        Currently only ``"greedy"`` is supported (greedy-stingy).
+    rng
+        One ``rng.randint`` is consumed before ``new_game``, then ``new_game``
+        uses the remaining stream for the deal / shuffle (**deck** configuration).
+        Use the same seed and the same exploration policy to reproduce a game.
+
+    exploration_rng
+        Separate RNG stream for ε-exploration. If omitted, it is
+        ``Random(rng.randint(...))`` using the draw above. When you pass your own
+        stream, that draw is still consumed so the **deck** matches the
+        implicit case.
+
+    explore_frac
+        Probability in ``[0, 1]`` that **each** decision point (MATCH phase move,
+        then PLAY phase move when applicable) is sampled uniformly among legal
+        moves instead of following the greedy baseline. ``0`` reproduces pure
+        greedy rollout.
+
+    policy
+        Legacy hook; greedy baseline is always used when exploration picks
+        ``greedy``.
     """
     rng = rng or Random()
+    # Always advance ``rng`` once so the deck shuffle matches older behaviour and
+    # matches runs where exploration RNG is supplied explicitly (caller-controlled stream).
+    explore_mix = rng.randint(1, (1 << 31) - 1)
+    if exploration_rng is None:
+        exploration_rng = Random(explore_mix)
+
     state = new_game(2, rng=rng, n_hand=n_hand)
     history = GameHistory(n_seats=2)
     samples: list[TurnSample] = []
@@ -173,7 +259,7 @@ def rollout_game(
 
         score_before_all = [total_score_points(state, s) for s in range(2)]
 
-        _apply_greedy_turn(state)
+        _apply_policy_turn(state, exploration_rng, explore_frac)
 
         score_delta_p = total_score_points(state, p) - score_before_all[p]
 

@@ -19,7 +19,8 @@ from pick14.rl.q_model import (
 
 @pytest.fixture
 def net() -> PickQNet:
-    return PickQNet()
+    # dropout=0 keeps forward/backward numerically deterministic in tests.
+    return PickQNet(dropout=0)
 
 
 @pytest.fixture
@@ -116,12 +117,12 @@ class TestPickQNetParameterCount:
 
 class TestPickQNetVariantConfig:
     def test_one_layer(self):
-        net = PickQNet(n_layers=1)
+        net = PickQNet(n_layers=1, dropout=0)
         q, opp = net(torch.randn(2, N_CARDS, IN_CHANNELS))
         assert q.shape == (2, 1)
 
     def test_three_layers(self):
-        net = PickQNet(n_layers=3)
+        net = PickQNet(n_layers=3, dropout=0)
         q, opp = net(torch.randn(2, N_CARDS, IN_CHANNELS))
         assert q.shape == (2, 1)
 

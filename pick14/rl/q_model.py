@@ -63,7 +63,9 @@ class PickQNet(nn.Module):
     n_layers : int
         Number of stacked attention blocks (default 2 per instructions).
     dropout : float
-        Dropout applied inside attention/FFN layers (0 = off, good for small data).
+        Dropout inside self-attention + FFN (``TransformerEncoderLayer``), and on
+        the Q-head MLP after ReLU (default ``0.1``). Use ``0`` for smallest
+        networks or overfitting probes.
     """
 
     def __init__(
@@ -74,7 +76,7 @@ class PickQNet(nn.Module):
         ffn_dim: int = FFN_DIM,
         n_layers: int = N_LAYERS,
         n_cards: int = N_CARDS,
-        dropout: float = 0.0,
+        dropout: float = 0.1,
     ) -> None:
         super().__init__()
         self.n_cards = n_cards
@@ -89,12 +91,11 @@ class PickQNet(nn.Module):
         )
 
         # ── Q head ────────────────────────────────────────────────────────
-        # Learnable per-latent-dim weights to collapse (batch, 54, 32) → (batch, 54)
-        # by a dot product along the latent axis.
         self.q_pool_w = nn.Parameter(torch.ones(latent) / latent)
         self.q_mlp = nn.Sequential(
             nn.Linear(n_cards, ffn_dim),
             nn.ReLU(),
+            nn.Dropout(dropout),
             nn.Linear(ffn_dim, 1),
         )
 
@@ -108,7 +109,8 @@ class PickQNet(nn.Module):
     def _init_weights(self) -> None:
         nn.init.xavier_uniform_(self.proj.weight)
         nn.init.zeros_(self.proj.bias)
-        for lin in [self.q_mlp[0], self.q_mlp[2]]:
+        # q_mlp: Linear → ReLU → Dropout → Linear
+        for lin in (self.q_mlp[0], self.q_mlp[3]):
             nn.init.xavier_uniform_(lin.weight)
             nn.init.zeros_(lin.bias)
 
