@@ -54,6 +54,8 @@ from pick14.rl.sim_core import (
     apply_match,
     apply_pass_match,
     apply_play,
+    clone_state,
+    greedy_stingy_match,
     greedy_stingy_play,
     is_finished,
     legal_moves,
@@ -61,10 +63,26 @@ from pick14.rl.sim_core import (
     new_game,
     total_score_points,
 )
-
 GAMMA = 0.9  # discount factor from instructions
 # Maximum future turns included in q_target (2-player ≈ two rounds when alternating).
 Q_TARGET_HORIZON_TURNS = 4
+
+# Branch fan-in caps — keeps shallow-rollout cost predictable (~tens of forks / game).
+_MAX_MATCH_FORKS_WHEN_GREEDY_PASSES = 2
+_MAX_PLAY_DISCARD_FORKS = 1
+_MAX_MATCH_ALTERNATIVES = 2
+# Hard ceiling on fork trajectories per game (≈ requested shallow-rollout breadth).
+_MAX_BRANCHES_PER_GAME = 22
+
+
+@dataclass
+class BranchRolloutStats:
+    """Telemetry when ``rollout_game`` runs baseline-vs-baseline fork simulations."""
+
+    stem_turns: int = 0
+    branches_spawned: int = 0
+    match_phase_branches: int = 0
+    play_phase_branches: int = 0
 
 
 def exploration_rng_for_deck_rep(deck_seed: int, rep: int) -> Random:
@@ -104,6 +122,8 @@ class TurnSample:
         Total score-pile points gained by ``agent_seat`` this turn (≥ 0).
     score_delta_match : float
         Portion of ``score_delta`` from scoring matches only (0 if pass–play path).
+    segment : str
+        ``stem`` for main greedy–stingy trajectory rows; ``fork`` for shallow-branch tails.
     chrono_index : int
         Step index ``0 … N-1`` in strict game chronological order (same order as rollout).
     """
@@ -115,6 +135,7 @@ class TurnSample:
     turn_index: int
     score_delta: float
     score_delta_match: float = 0.0
+    segment: str = "stem"
     chrono_index: int = -1
 
 
@@ -209,52 +230,97 @@ def _apply_greedy_turn(state: RlPick14State) -> tuple[int, int]:
     return _apply_policy_turn(state, Random(0), 0.0)
 
 
-# ---------------------------------------------------------------------------
-# Rollout
-# ---------------------------------------------------------------------------
+def _apply_baseline_turn(state: RlPick14State) -> None:
+    """Greedy–stingy baseline full turn."""
+    assert state.phase == TurnPhase.MATCH
+    m = greedy_stingy_match(state)
+    if m is not None:
+        apply_match(state, m.public_index, m.hand_indices, immediate_draw=True)
+        if state.phase == TurnPhase.PLAY:
+            apply_play(state, greedy_stingy_play(state).hand_index, immediate_draw=True)
+    else:
+        apply_pass_match(state)
+        apply_play(state, greedy_stingy_play(state).hand_index, immediate_draw=True)
 
-def rollout_game(
-    rng: Random | None = None,
+
+def _simulate_branch_tail(
+    state: RlPick14State,
+    history: GameHistory,
+    turns_budget: int,
     *,
-    exploration_rng: Random | None = None,
-    explore_frac: float = 0.0,
-    n_hand: int = 3,
-    policy: str = "greedy",
+    segment: str = "fork",
 ) -> list[TurnSample]:
     """
-    Play one full 2-player game and return a list of :class:`TurnSample`
-    objects, one per player per turn.
-
-    Parameters
-    ----------
-    rng
-        One ``rng.randint`` is consumed before ``new_game``, then ``new_game``
-        uses the remaining stream for the deal / shuffle (**deck** configuration).
-        Use the same seed and the same exploration policy to reproduce a game.
-
-    exploration_rng
-        Separate RNG stream for ε-exploration. If omitted, it is
-        ``Random(rng.randint(...))`` using the draw above. When you pass your own
-        stream, that draw is still consumed so the **deck** matches the
-        implicit case.
-
-    explore_frac
-        Probability in ``[0, 1]`` that **each** decision point (MATCH phase move,
-        then PLAY phase move when applicable) is sampled uniformly among legal
-        moves instead of following the greedy baseline. ``0`` reproduces pure
-        greedy rollout.
-
-    policy
-        Legacy hook; greedy baseline is always used when exploration picks
-        ``greedy``.
+    Greedy–stingy baseline for **both** seats — **no nested branching**.
+    Collect up to ``turns_budget`` :class:`TurnSample` rows (stem-compatible schema).
     """
-    rng = rng or Random()
-    # Always advance ``rng`` once so the deck shuffle matches older behaviour and
-    # matches runs where exploration RNG is supplied explicitly (caller-controlled stream).
-    explore_mix = rng.randint(1, (1 << 31) - 1)
-    if exploration_rng is None:
-        exploration_rng = Random(explore_mix)
+    samples: list[TurnSample] = []
+    turn_counts = [0, 0]
 
+    while len(samples) < turns_budget and not is_finished(state):
+        p = state.current_player
+        if state.phase != TurnPhase.MATCH:
+            raise RuntimeError(f"branch tail expected MATCH phase, got {state.phase}")
+
+        opp = 1 - p
+        tensor = encode_q_state(state, agent_seat=p, history=history)
+
+        opp_hand_target = np.zeros(54, dtype=np.float32)
+        for card in state.hands[opp]:
+            opp_hand_target[canonical_card_index(card)] = 1.0
+
+        score_before = total_score_points(state, p)
+        had_match = greedy_stingy_match(state) is not None
+        _apply_baseline_turn(state)
+        dtot = int(total_score_points(state, p) - score_before)
+        dmatch = int(dtot) if had_match else 0
+
+        sample = TurnSample(
+            state_tensor=tensor,
+            q_target=0.0,
+            opp_hand_target=opp_hand_target,
+            agent_seat=p,
+            turn_index=turn_counts[p],
+            score_delta=float(dtot),
+            score_delta_match=float(dmatch),
+            segment=segment,
+            chrono_index=len(samples),
+        )
+        samples.append(sample)
+        turn_counts[p] += 1
+
+        if not is_finished(state):
+            history.push(p, TurnRecord.from_state(state, p))
+
+    return samples
+
+
+def _effective_fork_tail_horizon(
+    branch_horizon_turns: int,
+    verification_states_per_game: int | None,
+) -> int:
+    """
+    Scale fork-tail depth so that, when fork branching saturates global caps,
+    cumulative fork rows stay near ``verification_states_per_game``.
+
+    Uses :data:`_MAX_BRANCHES_PER_GAME` as an upper bound on spawn count — worst-case
+    fork rows ``≤ branch_cap × horizon``.
+    """
+    h = branch_horizon_turns
+    if verification_states_per_game is None or verification_states_per_game <= 0:
+        return h
+    need_per_fork = (
+        verification_states_per_game + _MAX_BRANCHES_PER_GAME - 1
+    ) // _MAX_BRANCHES_PER_GAME
+    return max(h, need_per_fork)
+
+
+def _rollout_game_baseline_epsilon(
+    rng: Random,
+    exploration_rng: Random,
+    explore_frac: float,
+    n_hand: int,
+) -> list[TurnSample]:
     state = new_game(2, rng=rng, n_hand=n_hand)
     history = GameHistory(n_seats=2)
     samples: list[TurnSample] = []
@@ -267,11 +333,6 @@ def rollout_game(
 
         opp = 1 - p
 
-        # Record state *before* the turn is played (the "projected end-of-round"
-        # for this seat is computed by the Q network, but for training purposes
-        # we record the current state — the state that was shown to the agent
-        # at the start of their turn, which is the end-of-round state from
-        # the *previous* round for this seat).
         tensor = encode_q_state(state, agent_seat=p, history=history)
 
         opp_hand_target = np.zeros(54, dtype=np.float32)
@@ -282,22 +343,210 @@ def rollout_game(
 
         sample = TurnSample(
             state_tensor=tensor,
-            q_target=0.0,       # filled in by backfill_targets
+            q_target=0.0,
             opp_hand_target=opp_hand_target,
             agent_seat=p,
             turn_index=turn_counts[p],
             score_delta=float(dtot),
             score_delta_match=float(dmatch),
+            segment="stem",
             chrono_index=len(samples),
         )
         samples.append(sample)
         turn_counts[p] += 1
 
-        # After the turn completes, push the new end-of-round record.
         if not is_finished(state):
             history.push(p, TurnRecord.from_state(state, p))
 
     return samples
+
+
+def _rollout_game_fork_baseline_vs_baseline(
+    rng: Random,
+    *,
+    branch_horizon_turns: int,
+    verification_states_per_game: int | None,
+    n_hand: int,
+    stats: BranchRolloutStats | None,
+) -> list[TurnSample]:
+    """Greedy–stingy for both seats; shallow forks; each tail runs baseline vs baseline."""
+    fork_tail_horizon = _effective_fork_tail_horizon(
+        branch_horizon_turns,
+        verification_states_per_game,
+    )
+    state = new_game(2, rng=rng, n_hand=n_hand)
+    history = GameHistory(n_seats=2)
+    stem_samples: list[TurnSample] = []
+    branch_chunks: list[list[TurnSample]] = []
+    turn_counts = [0, 0]
+    st = stats if stats is not None else BranchRolloutStats()
+
+    while not is_finished(state):
+        p = state.current_player
+        if state.phase != TurnPhase.MATCH:
+            raise RuntimeError(f"Expected MATCH phase, got {state.phase}")
+
+        opp = 1 - p
+        tensor = encode_q_state(state, agent_seat=p, history=history)
+
+        opp_hand_target = np.zeros(54, dtype=np.float32)
+        for card in state.hands[opp]:
+            opp_hand_target[canonical_card_index(card)] = 1.0
+
+        stem_snap_b = clone_state(state)
+
+        mm = greedy_stingy_match(state)
+        if mm is not None:
+            alt_matches = [
+                x
+                for x in _legal_matches(state)
+                if x.public_index != mm.public_index or x.hand_indices != mm.hand_indices
+            ]
+            for alt_m in alt_matches[:_MAX_MATCH_ALTERNATIVES]:
+                if st.branches_spawned >= _MAX_BRANCHES_PER_GAME:
+                    break
+                bx = clone_state(stem_snap_b)
+                bh = history.clone()
+                apply_match(bx, alt_m.public_index, alt_m.hand_indices, immediate_draw=True)
+                if bx.phase == TurnPhase.PLAY:
+                    apply_play(bx, greedy_stingy_play(bx).hand_index, immediate_draw=True)
+                st.match_phase_branches += 1
+                st.branches_spawned += 1
+                if not is_finished(bx):
+                    branch_chunks.append(_simulate_branch_tail(bx, bh, fork_tail_horizon))
+
+            score_before = total_score_points(state, p)
+            apply_match(state, mm.public_index, mm.hand_indices, immediate_draw=True)
+            if state.phase == TurnPhase.PLAY:
+                plays = legal_play_moves(state)
+                if len(plays) > 1:
+                    gp = greedy_stingy_play(state)
+                    snap = clone_state(state)
+                    hsnap = history.clone()
+                    alt_pm = [pm for pm in plays if pm.hand_index != gp.hand_index]
+                    for pm in alt_pm[:_MAX_PLAY_DISCARD_FORKS]:
+                        if st.branches_spawned >= _MAX_BRANCHES_PER_GAME:
+                            break
+                        bx = clone_state(snap)
+                        bh = hsnap.clone()
+                        apply_play(bx, pm.hand_index, immediate_draw=True)
+                        st.play_phase_branches += 1
+                        st.branches_spawned += 1
+                        if not is_finished(bx):
+                            branch_chunks.append(_simulate_branch_tail(bx, bh, fork_tail_horizon))
+                    apply_play(state, gp.hand_index, immediate_draw=True)
+                elif plays:
+                    apply_play(state, plays[0].hand_index, immediate_draw=True)
+            dtot = int(total_score_points(state, p) - score_before)
+            dmatch = int(dtot)
+        else:
+            tmp = clone_state(state)
+            apply_pass_match(tmp)
+            gp_base = greedy_stingy_play(tmp)
+            alt_pp = [
+                pm
+                for pm in legal_play_moves(state)
+                if pm.hand_index != gp_base.hand_index
+            ]
+            for pm in alt_pp[:_MAX_PLAY_DISCARD_FORKS]:
+                if st.branches_spawned >= _MAX_BRANCHES_PER_GAME:
+                    break
+                bx = clone_state(stem_snap_b)
+                bh = history.clone()
+                apply_pass_match(bx)
+                apply_play(bx, pm.hand_index, immediate_draw=True)
+                st.match_phase_branches += 1
+                st.branches_spawned += 1
+                if not is_finished(bx):
+                    branch_chunks.append(_simulate_branch_tail(bx, bh, fork_tail_horizon))
+
+            score_before = total_score_points(state, p)
+            apply_pass_match(state)
+            apply_play(state, gp_base.hand_index, immediate_draw=True)
+            dtot = int(total_score_points(state, p) - score_before)
+            dmatch = 0
+
+        sample = TurnSample(
+            state_tensor=tensor,
+            q_target=0.0,
+            opp_hand_target=opp_hand_target,
+            agent_seat=p,
+            turn_index=turn_counts[p],
+            score_delta=float(dtot),
+            score_delta_match=float(dmatch),
+            segment="stem",
+            chrono_index=len(stem_samples),
+        )
+        stem_samples.append(sample)
+        turn_counts[p] += 1
+        st.stem_turns += 1
+
+        if not is_finished(state):
+            history.push(p, TurnRecord.from_state(state, p))
+
+    backfill_targets(stem_samples)
+    for chunk in branch_chunks:
+        backfill_targets(chunk)
+
+    out: list[TurnSample] = []
+    chrono = 0
+    for s in stem_samples:
+        s.chrono_index = chrono
+        chrono += 1
+        out.append(s)
+    for chunk in branch_chunks:
+        for s in chunk:
+            s.chrono_index = chrono
+            chrono += 1
+            out.append(s)
+
+    return out
+
+
+def rollout_game(
+    rng: Random | None = None,
+    *,
+    exploration_rng: Random | None = None,
+    explore_frac: float = 0.0,
+    n_hand: int = 3,
+    policy: str = "greedy",
+    fork_rollout: bool = False,
+    branch_horizon_turns: int = 4,
+    verification_states_per_game: int | None = None,
+    branch_stats: BranchRolloutStats | None = None,
+) -> list[TurnSample]:
+    """
+    Play one full 2-player game and return :class:`TurnSample` rows.
+
+    Legacy (**``fork_rollout`` is False**) — ε exploration vs greedy baseline on both seats.
+    Targets are left at ``0``; callers run :func:`backfill_targets`.
+
+    With **``fork_rollout=True``** — greedy–stingy baseline on **both** seats on the stem,
+    with shallow MATCH/PLAY forks per :data:`_MAX_MATCH_ALTERNATIVES`,
+    :data:`_MAX_PLAY_DISCARD_FORKS`, and cap :data:`_MAX_BRANCHES_PER_GAME`.
+    Each fork tail runs ``branch_horizon_turns`` baseline-vs-baseline turns without nesting
+    (raised toward ``verification_states_per_game`` via :func:`_effective_fork_tail_horizon`).
+    Rows concatenate stem then forks; targets are filled inside this call —
+    **do not** call ``backfill_targets`` again on the merged list.
+    """
+    rng = rng or Random()
+    explore_mix = rng.randint(1, (1 << 31) - 1)
+    if exploration_rng is None:
+        exploration_rng = Random(explore_mix)
+
+    if fork_rollout:
+        if explore_frac != 0.0:
+            raise ValueError("use explore_frac=0 when fork_rollout=True")
+        return _rollout_game_fork_baseline_vs_baseline(
+            rng,
+            branch_horizon_turns=branch_horizon_turns,
+            verification_states_per_game=verification_states_per_game,
+            n_hand=n_hand,
+            stats=branch_stats,
+        )
+
+    _ = policy  # legacy unused
+    return _rollout_game_baseline_epsilon(rng, exploration_rng, explore_frac, n_hand)
 
 
 # ---------------------------------------------------------------------------

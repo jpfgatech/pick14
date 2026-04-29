@@ -41,3 +41,15 @@ def test_load_rollout_qt_1d_expanded(tmp_path: Path) -> None:
     np.savez_compressed(tmp_path / "shard_00000.npz", x=x, qt=qt, opp=opp)
     _, qt2, _ = load_rollout_shards_numpy(tmp_path)
     assert qt2.shape == (2, 1)
+
+
+def test_load_rollout_shards_load_segment(tmp_path: Path) -> None:
+    x = np.zeros((2, 54, 27), dtype=np.float32)
+    qt = np.zeros((2, 1), dtype=np.float32)
+    opp = np.zeros((2, 54), dtype=np.float32)
+    seg = np.array([0, 1], dtype=np.uint8)
+    np.savez_compressed(tmp_path / "shard_00000.npz", x=x, qt=qt, opp=opp, seg=seg)
+    xo2, qt2, oppo2, sg = load_rollout_shards_numpy(tmp_path, load_segment=True)
+    assert xo2.shape == (2, 54, 27)
+    assert sg.shape == (2,) and sg.dtype == np.uint8
+    assert np.array_equal(sg, seg)

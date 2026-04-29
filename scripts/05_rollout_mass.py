@@ -8,8 +8,11 @@ initial shuffle (``Random(deck_seed)`` → ``new_game``) — **N × R** games to
 Uses **baseline-vs-baseline fork rollout** (greedy–stingy stem + shallow MATCH/PLAY
 forks; targets filled inside ``rollout_game``). No ε exploration.
 
-Per trajectory segment, discounted pairwise gaps use ``Q_TARGET_HORIZON_TURNS``
-(default **4** / two rounds via fork tails + stem merge).
+Per game, fork tails are labeled ``segment=fork`` in :class:`~pick14.rl.q_targets.TurnSample`;
+shards store an optional ``seg`` column (``0`` stem, ``1`` fork) for verification splits.
+
+``--verification-states-per-game`` bumps fork-tail depth toward ~that many fork rows at
+full fork spawning (bounded by global fork caps × horizon).
 
 Writes compressed NumPy shards plus ``manifest.jsonl.gz`` (one JSON object per game).
 
@@ -40,7 +43,7 @@ import numpy as np
 
 sys.path.insert(0, ".")
 
-from pick14.rl.q_targets import rollout_game
+from pick14.rl.q_targets import _effective_fork_tail_horizon, rollout_game
 from pick14.rl.q_train import samples_to_tensors
 
 
@@ -50,17 +53,20 @@ def _flush_shard(
     xs: list[np.ndarray],
     qts: list[np.ndarray],
     opps: list[np.ndarray],
+    segs: list[np.ndarray],
     fp16: bool,
 ) -> Path:
     x = np.concatenate(xs, axis=0)
     qt = np.concatenate(qts, axis=0)
     opp = np.concatenate(opps, axis=0)
+    seg = np.concatenate(segs, axis=0)
     if fp16:
         x = x.astype(np.float16)
         qt = qt.astype(np.float16)
         opp = opp.astype(np.float16)
+        seg = seg.astype(np.uint8)
     path = out_dir / f"shard_{shard_idx:05d}.npz"
-    np.savez_compressed(path, x=x, qt=qt, opp=opp)
+    np.savez_compressed(path, x=x, qt=qt, opp=opp, seg=seg)
     return path
 
 
@@ -78,7 +84,13 @@ def main() -> None:
         "--branch-horizon-turns",
         type=int,
         default=4,
-        help="Fork simulation depth (default 4 ≈ two two-player rounds)",
+        help="Minimum fork-tail depth per spawned branch (before verification bump)",
+    )
+    p.add_argument(
+        "--verification-states-per-game",
+        type=int,
+        default=100,
+        help="Target ~N fork-tail state rows per game (scales fork-tail horizon)",
     )
     p.add_argument(
         "--clear-output-dir",
@@ -90,13 +102,20 @@ def main() -> None:
     total_plan = args.deck_configs * args.reps_per_deck
     done_cap = args.max_games if args.max_games > 0 else total_plan
 
+    eff_horizon = _effective_fork_tail_horizon(
+        args.branch_horizon_turns,
+        args.verification_states_per_game,
+    )
+
     print(
         f"Deck seeds [{args.deck_start}, {args.deck_start + args.deck_configs}), "
         f"reps/deck={args.reps_per_deck}, planned games={total_plan}, "
         f"cap={done_cap}"
     )
     print(
-        f"fork_rollout (baseline vs baseline)  branch_horizon={args.branch_horizon_turns}  "
+        f"fork_rollout  branch_horizon≥{args.branch_horizon_turns}  "
+        f"verification_fork_rows≈{args.verification_states_per_game}  "
+        f"effective_fork_tail_horizon={eff_horizon}  "
         f"shard_every={args.shard_every_games}  → {args.output_dir}"
     )
     if args.dry_run:
@@ -113,6 +132,7 @@ def main() -> None:
     xs_buf: list[np.ndarray] = []
     qts_buf: list[np.ndarray] = []
     opps_buf: list[np.ndarray] = []
+    segs_buf: list[np.ndarray] = []
     games_in_shard = 0
     games_done = 0
 
@@ -130,8 +150,15 @@ def main() -> None:
                     rng=deck_rng,
                     fork_rollout=True,
                     branch_horizon_turns=args.branch_horizon_turns,
+                    verification_states_per_game=(
+                        args.verification_states_per_game
+                        if args.verification_states_per_game > 0
+                        else None
+                    ),
                 )
-                x, qt, opp = samples_to_tensors(samples)
+                x, qt, opp, seg = samples_to_tensors(samples, include_segment=True)
+                n_stem = sum(1 for s in samples if s.segment == "stem")
+                n_fork = len(samples) - n_stem
 
                 mf.write(
                     json.dumps(
@@ -139,6 +166,9 @@ def main() -> None:
                             "deck_seed": ds,
                             "rep": rep,
                             "n_samples": len(samples),
+                            "n_stem": n_stem,
+                            "n_fork": n_fork,
+                            "effective_fork_tail_horizon": eff_horizon,
                             "shard_next": shard_idx,
                         }
                     )
@@ -148,19 +178,22 @@ def main() -> None:
                 xs_buf.append(x.numpy())
                 qts_buf.append(qt.numpy())
                 opps_buf.append(opp.numpy())
+                segs_buf.append(seg.numpy())
                 games_in_shard += 1
                 games_done += 1
 
                 if games_in_shard >= args.shard_every_games:
-                    path = _flush_shard(out_dir, shard_idx, xs_buf, qts_buf, opps_buf, args.fp16)
+                    path = _flush_shard(
+                        out_dir, shard_idx, xs_buf, qts_buf, opps_buf, segs_buf, args.fp16
+                    )
                     elapsed = time.perf_counter() - t0
                     print(f"  wrote {path.name}  ({games_done} games, {elapsed:.1f}s elapsed)")
                     shard_idx += 1
-                    xs_buf, qts_buf, opps_buf = [], [], []
+                    xs_buf, qts_buf, opps_buf, segs_buf = [], [], [], []
                     games_in_shard = 0
 
     if xs_buf:
-        path = _flush_shard(out_dir, shard_idx, xs_buf, qts_buf, opps_buf, args.fp16)
+        path = _flush_shard(out_dir, shard_idx, xs_buf, qts_buf, opps_buf, segs_buf, args.fp16)
         print(f"  wrote {path.name} (final partial shard)")
         shard_idx += 1
 
