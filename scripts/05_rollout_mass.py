@@ -2,13 +2,14 @@
 Mass rollout for Q training data (instructions/05.md).
 
 For **N** distinct deck seeds, run **R** independent games each with the same
-initial shuffle (``Random(deck_seed)`` → ``new_game``) but separate exploration
-RNGs — **N × R** games total (default **10_000 × 8 = 80_000**).
+initial shuffle (``Random(deck_seed)`` → ``new_game``) — **N × R** games total
+(default **10_000 × 8 = 80_000**).
 
-Uses ε = ``--explore-frac`` (default **0.25**) random exploration vs greedy baseline
-at MATCH and PLAY decisions.  Per-game ``backfill_targets`` writes **future-only**
-discounted pairwise gaps (next up to ``Q_TARGET_HORIZON_TURNS`` chronological
-steps; default **4** / two rounds), not the full-game return.
+Uses **baseline-vs-baseline fork rollout** (greedy–stingy stem + shallow MATCH/PLAY
+forks; targets filled inside ``rollout_game``). No ε exploration.
+
+Per trajectory segment, discounted pairwise gaps use ``Q_TARGET_HORIZON_TURNS``
+(default **4** / two rounds via fork tails + stem merge).
 
 Writes compressed NumPy shards plus ``manifest.jsonl.gz`` (one JSON object per game).
 
@@ -19,9 +20,9 @@ Smoke test (few games):
     python scripts/05_rollout_mass.py --deck-configs 2 --reps-per-deck 3 \\
         --shard-every-games 2 --max-games 4 --output-dir rollout_chunks
 
-Full scale (``q_target`` = future-only γ-weighted horizon from ``backfill_targets``):
+Full scale:
     python scripts/05_rollout_mass.py --deck-configs 10000 --reps-per-deck 8 \\
-        --explore-frac 0.25 --shard-every-games 500 --output-dir rollout_data
+        --shard-every-games 500 --output-dir rollout_data
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from __future__ import annotations
 import argparse
 import gzip
 import json
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -38,11 +40,7 @@ import numpy as np
 
 sys.path.insert(0, ".")
 
-from pick14.rl.q_targets import (
-    backfill_targets,
-    exploration_rng_for_deck_rep,
-    rollout_game,
-)
+from pick14.rl.q_targets import rollout_game
 from pick14.rl.q_train import samples_to_tensors
 
 
@@ -71,12 +69,22 @@ def main() -> None:
     p.add_argument("--deck-start", type=int, default=0)
     p.add_argument("--deck-configs", type=int, default=10_000)
     p.add_argument("--reps-per-deck", type=int, default=8)
-    p.add_argument("--explore-frac", type=float, default=0.25)
     p.add_argument("--shard-every-games", type=int, default=500)
     p.add_argument("--output-dir", type=str, default="rollout_data")
     p.add_argument("--fp16", action="store_true", help="Store tensors as float16")
     p.add_argument("--dry-run", action="store_true", help="Print plan only")
     p.add_argument("--max-games", type=int, default=0, help="Stop after N games (0=all)")
+    p.add_argument(
+        "--branch-horizon-turns",
+        type=int,
+        default=4,
+        help="Fork simulation depth (default 4 ≈ two two-player rounds)",
+    )
+    p.add_argument(
+        "--clear-output-dir",
+        action="store_true",
+        help="Remove existing output-dir contents before writing (destructive)",
+    )
     args = p.parse_args()
 
     total_plan = args.deck_configs * args.reps_per_deck
@@ -87,12 +95,17 @@ def main() -> None:
         f"reps/deck={args.reps_per_deck}, planned games={total_plan}, "
         f"cap={done_cap}"
     )
-    print(f"explore_frac={args.explore_frac}  shard_every={args.shard_every_games}  → {args.output_dir}")
+    print(
+        f"fork_rollout (baseline vs baseline)  branch_horizon={args.branch_horizon_turns}  "
+        f"shard_every={args.shard_every_games}  → {args.output_dir}"
+    )
     if args.dry_run:
         print("[dry-run] exiting.")
         return
 
     out_dir = Path(args.output_dir)
+    if args.clear_output_dir and out_dir.exists():
+        shutil.rmtree(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = out_dir / "manifest.jsonl.gz"
 
@@ -113,13 +126,11 @@ def main() -> None:
                 if games_done >= done_cap:
                     break
                 deck_rng = Random(ds)
-                ex_rng = exploration_rng_for_deck_rep(ds, rep)
                 samples = rollout_game(
                     rng=deck_rng,
-                    exploration_rng=ex_rng,
-                    explore_frac=args.explore_frac,
+                    fork_rollout=True,
+                    branch_horizon_turns=args.branch_horizon_turns,
                 )
-                backfill_targets(samples)
                 x, qt, opp = samples_to_tensors(samples)
 
                 mf.write(
