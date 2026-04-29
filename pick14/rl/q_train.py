@@ -67,6 +67,29 @@ def samples_to_tensors(
     return x, qt, opp
 
 
+def global_val_q_mse(
+    model: nn.Module,
+    x_va: torch.Tensor,
+    qt_va: torch.Tensor,
+    microbatch: int = 8192,
+) -> float:
+    """
+    Global validation MSE ``mean((q_pred - qt)^2)`` over all rows, computed in
+    micro-batches so large CPU tensors need not occupy GPU VRAM at once.
+    """
+    model.eval()
+    compute_dev = next(model.parameters()).device
+    n = x_va.shape[0]
+    total = 0.0
+    with torch.no_grad():
+        for start in range(0, n, microbatch):
+            xb = x_va[start:start + microbatch].to(compute_dev, non_blocking=True)
+            qtb = qt_va[start:start + microbatch].to(compute_dev, non_blocking=True)
+            q_pred, _ = model(xb)
+            total += nn.MSELoss(reduction="sum")(q_pred, qtb).item()
+    return total / float(n)
+
+
 def train_epoch(
     model: nn.Module,
     x: torch.Tensor,
@@ -83,14 +106,15 @@ def train_epoch(
     """
     model.train()
     N = x.shape[0]
-    perm = torch.randperm(N)
+    compute_dev = next(model.parameters()).device
+    perm = torch.randperm(N, device=x.device)
     x, qt, opp = x[perm], qt[perm], opp[perm]
 
     q_losses, opp_losses = [], []
     for start in range(0, N, batch_size):
-        xb  = x[start:start + batch_size]
-        qtb = qt[start:start + batch_size]
-        ob  = opp[start:start + batch_size]
+        xb = x[start:start + batch_size].to(compute_dev, non_blocking=True)
+        qtb = qt[start:start + batch_size].to(compute_dev, non_blocking=True)
+        ob = opp[start:start + batch_size].to(compute_dev, non_blocking=True)
 
         optimizer.zero_grad()
         q_pred, opp_pred = model(xb)

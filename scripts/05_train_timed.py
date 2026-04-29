@@ -93,7 +93,12 @@ sys.path.insert(0, ".")
 
 from pick14.rl.q_model import PickQNet
 from pick14.rl.q_targets import backfill_targets, rollout_game
-from pick14.rl.q_train import load_rollout_shards_numpy, samples_to_tensors, train_epoch
+from pick14.rl.q_train import (
+    global_val_q_mse,
+    load_rollout_shards_numpy,
+    samples_to_tensors,
+    train_epoch,
+)
 
 
 def _tee_log(path: Path) -> None:
@@ -198,6 +203,12 @@ def main() -> None:
         default=0,
         help="After loading shards, randomly subsample to at most N rows (0 = use all)",
     )
+    p.add_argument(
+        "--val-batch",
+        type=int,
+        default=8192,
+        help="Micro-batch size for validation MSE (for large CPU-held tensors)",
+    )
     args = p.parse_args()
 
     repo_root = Path(__file__).resolve().parent.parent
@@ -261,11 +272,15 @@ def main() -> None:
         print(f"Dataset: {len(all_samples)} samples in {roll_s:.1f}s", flush=True)
         x, qt, opp = samples_to_tensors(all_samples)
 
-    x, qt, opp = x.to(device), qt.to(device), opp.to(device)
+    if rollout_from_disk:
+        # Keep full dataset on CPU; train_epoch moves mini-batches to GPU (fits 8 GB VRAM + multi-M row data).
+        x, qt, opp = x.cpu(), qt.cpu(), opp.cpu()
+    else:
+        x, qt, opp = x.to(device), qt.to(device), opp.to(device)
 
     n = x.shape[0]
     perm_np = np.random.RandomState(args.seed).permutation(n)
-    perm = torch.as_tensor(perm_np, dtype=torch.long, device=device)
+    perm = torch.as_tensor(perm_np, dtype=torch.long, device=x.device)
     split = int(0.9 * n)
     tr_idx, va_idx = perm[:split], perm[split:]
     x_tr, qt_tr, opp_tr = x[tr_idx], qt[tr_idx], opp[tr_idx]
@@ -310,9 +325,7 @@ def main() -> None:
         train_losses.append(stats["q_loss"])
 
         model.eval()
-        with torch.no_grad():
-            q_pred, _ = model(x_va)
-            val_q = float(torch.nn.MSELoss()(q_pred, qt_va).item())
+        val_q = global_val_q_mse(model, x_va, qt_va, microbatch=args.val_batch)
         val_losses.append(val_q)
         model.train()
         if device.type == "cuda":
