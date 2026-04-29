@@ -132,6 +132,16 @@ class GameHistory:
         """
         return list(self._records[seat])
 
+    def clone(self) -> "GameHistory":
+        """Independent copy (fork for branch simulations branched off the stem)."""
+        nh = GameHistory(n_seats=self.n_seats)
+        for seat in range(self.n_seats):
+            nh._records[seat] = deque(
+                list(self._records[seat]),
+                maxlen=N_HISTORY_TURNS,
+            )
+        return nh
+
 
 # ---------------------------------------------------------------------------
 # Full state encoder
