@@ -40,6 +40,7 @@ Decision procedure (see :func:`decide`)
 from __future__ import annotations
 
 import random as _random
+from random import Random
 from dataclasses import dataclass
 from itertools import combinations
 from typing import Protocol
@@ -177,6 +178,8 @@ def _enum_draw_outcomes(
     player: int,
     target: int,
     max_branches: int | None,
+    *,
+    rng: Random | None = None,
 ) -> list[RlPick14State]:
     """
     Enumerate possible states after drawing from ``state.deck`` until *player*'s
@@ -203,7 +206,10 @@ def _enum_draw_outcomes(
 
     all_combos = list(combinations(range(D), need))
     if max_branches is not None and len(all_combos) > max_branches:
-        all_combos = _random.sample(all_combos, max_branches)
+        if rng is not None:
+            all_combos = rng.sample(all_combos, max_branches)
+        else:
+            all_combos = _random.sample(all_combos, max_branches)
 
     outcomes: list[RlPick14State] = []
     for combo in all_combos:
