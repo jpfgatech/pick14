@@ -7,6 +7,9 @@ inference wiring as scripts/05_cp6_quality.py (trained checkpoint from disk; no 
 
 Baseline turn = greedy_stingy_match then greedy_stingy_play (rl.md §1.5).
 Q-agent turn after MatchMove uses greedy_stingy_play for the forced PLAY step (same as CP6).
+
+Trace mode (--trace-one-game): run a single game and print each MATCH situation — Q options
+(immediate_pts, projected_q, combined), greedy decision; baseline mirror policy description.
 """
 
 from __future__ import annotations
@@ -21,6 +24,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from pick14.cards import format_card
 from pick14.rl.direct_q import decide
 from pick14.rl.q_model import PickQNet
 from pick14.rl.q_state import GameHistory, TurnRecord, encode_q_state
@@ -31,9 +35,11 @@ from pick14.rl.sim_core import (
     apply_match,
     apply_pass_match,
     apply_play,
+    clone_state,
     greedy_stingy_match,
     greedy_stingy_play,
     is_finished,
+    match_capture_points,
     new_game,
     total_score_points,
 )
@@ -64,6 +70,34 @@ class TrainedQAdapter:
         return [float(v) for v in q.squeeze(-1).cpu().tolist()]
 
 
+def apply_first_level_action(state, action: PlayMove | MatchMove, q_seat: int) -> None:
+    """Apply PickQ choice at MATCH; stingy PLAY after match matches rollout scripts."""
+    assert state.phase == TurnPhase.MATCH
+    assert state.current_player == q_seat
+    if isinstance(action, PlayMove):
+        apply_pass_match(state)
+        apply_play(state, action.hand_index, immediate_draw=True)
+    elif isinstance(action, MatchMove):
+        apply_match(state, action.public_index, action.hand_indices, immediate_draw=True)
+        if state.phase == TurnPhase.PLAY:
+            apply_play(state, greedy_stingy_play(state).hand_index, immediate_draw=True)
+    else:
+        raise RuntimeError(f"unexpected action type from decide: {type(action)}")
+
+
+def apply_q_turn(state, adapter: TrainedQAdapter, acting_player: int) -> None:
+    """direct_q.decide at MATCH; forced PLAY after match uses greedy_stingy_play."""
+    action, _ = decide(
+        state,
+        adapter,
+        acting_player=acting_player,
+        tau=1.0,
+        greedy=True,
+        max_match_branches=8,
+    )
+    apply_first_level_action(state, action, acting_player)
+
+
 def apply_greedy_stingy_turn(state) -> None:
     """Greedy capture match + stingy discard (baseline policy)."""
     assert state.phase == TurnPhase.MATCH
@@ -77,30 +111,127 @@ def apply_greedy_stingy_turn(state) -> None:
         apply_play(state, greedy_stingy_play(state).hand_index, immediate_draw=True)
 
 
-def apply_q_turn(
-    state,
-    adapter: TrainedQAdapter,
-    acting_player: int,
-) -> None:
-    """direct_q.decide at MATCH; forced PLAY after match uses greedy_stingy_play."""
-    assert state.phase == TurnPhase.MATCH
-    action, _ = decide(
-        state,
-        adapter,
-        acting_player=acting_player,
-        tau=1.0,
-        greedy=True,
-        max_match_branches=8,
-    )
-    if isinstance(action, PlayMove):
-        apply_pass_match(state)
-        apply_play(state, action.hand_index, immediate_draw=True)
-    elif isinstance(action, MatchMove):
-        apply_match(state, action.public_index, action.hand_indices, immediate_draw=True)
-        if state.phase == TurnPhase.PLAY:
-            apply_play(state, greedy_stingy_play(state).hand_index, immediate_draw=True)
+def _hand_public_snapshot(state, actor: int) -> list[str]:
+    pub = ", ".join(format_card(c).strip() for c in state.public) or "(empty)"
+    hand_parts = [
+        f"[{i}] {format_card(c).strip()}" for i, c in enumerate(state.hands[actor])
+    ]
+    hand = "  ".join(hand_parts)
+    return [
+        f"  public ({len(state.public)}): {pub}",
+        f"  actor seat {actor} hand ({len(state.hands[actor])}): {hand}",
+        f"  deck remaining: {len(state.deck)}",
+    ]
+
+
+def _describe_baseline_intended(state) -> list[str]:
+    """Inspect greedy–stingy policy on a clone (does not mutate ``state``)."""
+    sc = clone_state(state)
+    assert sc.phase == TurnPhase.MATCH
+    p = sc.current_player
+    lines: list[str] = []
+    mm = greedy_stingy_match(sc)
+    if mm is not None:
+        pts = match_capture_points(sc, mm)
+        pub_c = sc.public[mm.public_index]
+        hc = [sc.hands[p][i] for i in mm.hand_indices]
+        pub_s = "+".join(format_card(c).strip() for c in [pub_c] + hc)
+        lines.append(f"    MATCH capture ~{pts} pts — pub[{mm.public_index}] ∩ hand{list(mm.hand_indices)}  ({pub_s})")
+        apply_match(sc, mm.public_index, mm.hand_indices, immediate_draw=True)
+        if sc.phase == TurnPhase.PLAY:
+            pm = greedy_stingy_play(sc)
+            pc = sc.hands[p][pm.hand_index]
+            lines.append(
+                f"    then stingy PLAY hand[{pm.hand_index}] → discard {format_card(pc).strip()}"
+            )
     else:
-        raise RuntimeError(f"unexpected action type from decide: {type(action)}")
+        lines.append("    PASS–MATCH (no scoring greedy match)")
+        apply_pass_match(sc)
+        pm = greedy_stingy_play(sc)
+        pc = sc.hands[p][pm.hand_index]
+        lines.append(
+            f"    stingy PLAY hand[{pm.hand_index}] → discard {format_card(pc).strip()}"
+        )
+    return lines
+
+
+def run_traced_game(
+    model: PickQNet,
+    device: torch.device,
+    rng: Random,
+    *,
+    q_seat: int,
+    tau: float,
+    greedy: bool,
+    max_match_branches: int,
+) -> tuple[int, int]:
+    hist = GameHistory(n_seats=2)
+    adapter = TrainedQAdapter(model, hist, device)
+    state = new_game(2, rng=rng)
+    baseline_seat = 1 - q_seat
+
+    mode = "greedy argmax on combined" if greedy else f"sample softmax (τ={tau})"
+    print("")
+    print(
+        f"Inference: immediate_pts + projected_Q → combined; "
+        f"{mode}. Match branches capped at {max_match_branches}."
+    )
+
+    step = 0
+    while not is_finished(state):
+        actor = state.current_player
+        step += 1
+        tag = "PickQ agent" if actor == q_seat else "baseline (greedy–stingy)"
+        print("")
+        print("=" * 72)
+        print(f"Step {step}  ·  {tag} to move  ·  seat {actor}")
+        print(f"  cumulative score pts — seat0={total_score_points(state, 0)!r}  "
+              f"seat1={total_score_points(state, 1)!r}")
+        for line in _hand_public_snapshot(state, actor):
+            print(line)
+
+        if actor == q_seat:
+            action, log = decide(
+                state,
+                adapter,
+                acting_player=q_seat,
+                tau=tau,
+                greedy=greedy,
+                max_match_branches=max_match_branches,
+            )
+            print("  Candidate actions (PickQ head @ MATCH):")
+            print(f"    {'#':>3}  {'imm':>5}  {'proj_Q':>10}  {'combined':>10}  {'prob':>8}  summary")
+            print(f"    {'---':>3}  {'-----':>5}  {'----------':>10}  {'----------':>10}  {'--------':>8}  -------")
+            for i, (av, pr) in enumerate(zip(log.action_values, log.softmax_probs, strict=True)):
+                mk = ">>" if i == log.chosen_idx else "  "
+                short = av.label.replace("\n", " ")
+                if len(short) > 72:
+                    short = short[:69] + "..."
+                print(
+                    f"    {mk}{i:>2}  {av.immediate_pts:>5}  {av.projected_q:>10.4f}  "
+                    f"{av.combined:>10.4f}  {pr:>8.5f}  {short}"
+                )
+            chosen = log.action_values[log.chosen_idx]
+            print(
+                f"  Decision: #{log.chosen_idx}  imm={chosen.immediate_pts}  "
+                f"proj_Q={chosen.projected_q:+.4f}  combined={chosen.combined:+.4f}"
+            )
+            apply_first_level_action(state, action, q_seat)
+        else:
+            print("  Baseline policy (same engine as apply_greedy_stingy_turn), preview on clone:")
+            for line in _describe_baseline_intended(state):
+                print(line)
+            apply_greedy_stingy_turn(state)
+
+        if not is_finished(state):
+            hist.push(actor, TurnRecord.from_state(state, actor))
+
+    sq = total_score_points(state, q_seat)
+    sb = total_score_points(state, baseline_seat)
+    print("")
+    print("=" * 72)
+    print(f"Final — PickQ seat {q_seat}: {sq} pts   baseline seat {baseline_seat}: {sb} pts")
+    return sq, sb
 
 
 def play_one_game(
@@ -137,6 +268,28 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--q-seat", type=int, default=0, choices=(0, 1))
     ap.add_argument("--device", type=str, default="cpu")
+    ap.add_argument(
+        "--trace-one-game",
+        action="store_true",
+        help="Simulate one game with full PickQ vs baseline decision trace on stdout",
+    )
+    ap.add_argument(
+        "--tau",
+        type=float,
+        default=1.0,
+        help="Softmax temperature when --trace-one-game and not --sample (ignored if greedy)",
+    )
+    ap.add_argument(
+        "--sample",
+        action="store_true",
+        help="With --trace-one-game: stochastic softmax instead of greedy argmax",
+    )
+    ap.add_argument(
+        "--max-match-branches",
+        type=int,
+        default=8,
+        help="Draw-refill branch cap for PickQ match projections",
+    )
     args = ap.parse_args()
 
     repo = Path(__file__).resolve().parents[1]
@@ -151,9 +304,24 @@ def main() -> None:
     model.load_state_dict(ck["model_state"])
     model.to(device)
 
+    q_seat = args.q_seat
+
+    if args.trace_one_game:
+        rng = Random(args.seed)
+        greedy = not args.sample
+        run_traced_game(
+            model,
+            device,
+            rng,
+            q_seat=q_seat,
+            tau=args.tau,
+            greedy=greedy,
+            max_match_branches=args.max_match_branches,
+        )
+        return
+
     deck_rng = Random(args.seed)
 
-    q_seat = args.q_seat
     b_seat = 1 - q_seat
     wins = 0
     draws = 0
