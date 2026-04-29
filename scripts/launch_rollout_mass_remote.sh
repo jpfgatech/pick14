@@ -2,7 +2,7 @@
 # Launch Git Bash on the Windows GPU box and run mass rollout (git pull + python).
 #
 # Requires:
-#   - Repo at ~/Documents/projects/pick14 with .git (clone evolve-play-strategy).
+#   - Repo at ~/Documents/projects/pick14_git with .git (clone evolve-play-strategy).
 #   - Git for Windows (bash.exe).
 #
 # Usage:
@@ -17,4 +17,4 @@ USER="${PICK14_REMOTE_USER:-administrator}"
 
 echo "SSH ${USER}@${HOST} → Git Bash → scripts/run_rollout_mass_remote_gitbash.sh"
 # shellcheck disable=SC2029
-ssh "${USER}@${HOST}" '"C:/Program Files/Git/bin/bash.exe" -lc "cd /c/Users/Administrator/Documents/projects/pick14 && exec bash scripts/run_rollout_mass_remote_gitbash.sh"'
+ssh "${USER}@${HOST}" '"C:/Program Files/Git/bin/bash.exe" -lc "cd /c/Users/Administrator/Documents/projects/pick14_git && exec bash scripts/run_rollout_mass_remote_gitbash.sh"'

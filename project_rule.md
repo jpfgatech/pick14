@@ -30,18 +30,18 @@ You are allowed to execute the python scripts in place
 You are encouraged to commit frequenctly with meaningful messages. You should often use commit --amend to keep meaningful commits only
 You should keep the data file in artifacts/ folder to avoid resimulation each time.
 
-**GPU server (mass rollout / heavy training):** SSH `administrator@100.74.144.124`. Repo checkout: `C:\Users\Administrator\Documents\projects\pick14`. Primary timed Q-training entrypoint: **`scripts/05_train_timed.py`**.
+**GPU server (mass rollout / heavy training):** SSH `administrator@100.74.144.124`. Canonical git checkout: **`C:\Users\Administrator\Documents\projects\pick14_git`** (`evolve-play-strategy`). Use **Git Bash** (`C:\Program Files\Git\bin\bash.exe`) for rollout scripts — see **`scripts/run_rollout_mass_remote_gitbash.sh`** and **`scripts/launch_rollout_mass_remote.sh`**. An older **`pick14`** folder without `.git` may still exist if Windows held locks; delete it after reboot if desired. Primary timed Q-training entrypoint: **`scripts/05_train_timed.py`**.
 
 Example (from SSH — use **absolute** paths so `cmd`/`python` resolve the script; relative `scripts\...` can fail):
 
 ```
-"C:\Users\Administrator\Documents\projects\venv\Scripts\python.exe" "C:\Users\Administrator\Documents\projects\pick14\scripts\05_train_timed.py" --games 800 --batch 64 --log-file train_run.log
+"C:\Users\Administrator\Documents\projects\venv\Scripts\python.exe" "C:\Users\Administrator\Documents\projects\pick14_git\scripts\05_train_timed.py" --games 800 --batch 64 --log-file train_run.log
 ```
 
-Or run **`scripts/gpu_pickq_train.cmd`** via `cmd.exe /c C:\Users\Administrator\Documents\projects\pick14\scripts\gpu_pickq_train.cmd` (wrapper embeds those paths).
+Or run **`scripts/gpu_pickq_train.cmd`** via `cmd.exe /c C:\Users\Administrator\Documents\projects\pick14_git\scripts\gpu_pickq_train.cmd` (wrapper embeds those paths).
 
 - **SSH default working directory:** OpenSSH often lands in `C:\Users\Administrator`, not the repo. If you pass **relative** paths such as `--output-dir rollout_data` or `--rollout-dir rollout_data`, **must** set cwd first, e.g.  
-  `cmd.exe /c "cd /d C:\Users\Administrator\Documents\projects\pick14 && …\python.exe" …\scripts\05_rollout_mass.py --output-dir rollout_data`  
+  `cmd.exe /c "cd /d C:\Users\Administrator\Documents\projects\pick14_git && …\python.exe" …\scripts\05_rollout_mass.py --output-dir rollout_data`  
   (same pattern for `05_train_timed.py`). Otherwise shards or shard loads resolve to the wrong folder.
 
 You should always use git to synchronize towards and from the server, including artifacts like training checkpoints.
