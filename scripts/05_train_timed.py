@@ -18,10 +18,12 @@ Definitions (precise)
 
 **Regression targets**
 
-Each ``TurnSample`` has scalar ``q_target``: discounted future score-gap vs the
-concurrent opponent (γ = 0.9), from ``backfill_targets`` — stacked as ``qt`` of
-shape ``(N, 1)``. Immediate match capture points are **not** in ``qt`` (they are
-handled in ``direct_q`` at decision time).
+Each ``TurnSample`` has scalar ``q_target``: **future-only** discounted score-gap
+vs the concurrent opponent — ``Σ_{h=1..H} γ^h · gap[j+h]`` in chronological turn
+order (default γ = 0.9, ``H`` = ``Q_TARGET_HORIZON_TURNS``, typically **4** future
+steps ≈ two rounds). The gap on the **current** timestep ``j`` is excluded, so
+immediate match capture points never appear in ``qt``; add those via ``immediate_pts``
+in ``direct_q`` at decision time.
 
 **Forward**
 
@@ -40,6 +42,7 @@ Then::
     tr_q = mean_batches(Q_batch)
 
 So ``tr_q`` is the **mean of per-batch Q-MSEs** (each batch uses only its rows).
+``tr_rmse = sqrt(tr_q)`` is reported next to it (same for ``val_rmse`` vs ``val_q``).
 If ``N_train % batch_size != 0``, this differs slightly from one global mean over
 all training rows.
 
@@ -51,6 +54,7 @@ included in ``tr_q``.
 After ``train_epoch``, ``model.eval()`` — single forward on **all** validation rows::
 
     val_q = mean_j ( q_pred_j − qt_j )²      # global MSE over ``x_va``
+    val_rmse = sqrt(val_q)
 
 **``val_cv``**
 
@@ -67,7 +71,7 @@ variance across validation samples within one epoch.
 Usage:
     python scripts/05_train_timed.py --games 800
     python scripts/05_train_timed.py --rollout-dir rollout_data
-    python scripts/05_train_timed.py --rollout-dir rollout_data --max-samples 500000
+    python scripts/05_train_timed.py --rollout-dir rollout_data --epochs 50
     python scripts/05_train_timed.py --games 2000 --stable-window 60 --stable-rel 0.015
     python scripts/05_train_timed.py --games 800 --max-minutes 5
 
@@ -79,6 +83,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 import time
@@ -92,7 +97,12 @@ import torch
 sys.path.insert(0, ".")
 
 from pick14.rl.q_model import PickQNet
-from pick14.rl.q_targets import backfill_targets, rollout_game
+from pick14.rl.q_targets import (
+    GAMMA,
+    Q_TARGET_HORIZON_TURNS,
+    backfill_targets,
+    rollout_game,
+)
 from pick14.rl.q_train import (
     global_val_q_mse,
     load_rollout_shards_numpy,
@@ -168,6 +178,13 @@ def main() -> None:
         help="Hard stop even if not stable",
     )
     p.add_argument(
+        "--epochs",
+        type=int,
+        default=0,
+        help="If >0, run exactly this many epochs (sets max-epochs; disables early "
+        "stability stop so the run does not exit early)",
+    )
+    p.add_argument(
         "--max-minutes",
         type=float,
         default=0.0,
@@ -210,6 +227,10 @@ def main() -> None:
         help="Micro-batch size for validation MSE (for large CPU-held tensors)",
     )
     args = p.parse_args()
+    if args.epochs > 0:
+        args.max_epochs = args.epochs
+        # Prevent stability early-stop before the fixed epoch budget completes.
+        args.min_epochs = args.epochs + 999_999
 
     repo_root = Path(__file__).resolve().parent.parent
     os.chdir(repo_root)
@@ -225,6 +246,12 @@ def main() -> None:
     print(f"[{datetime.now(timezone.utc).isoformat()}] device={device}", flush=True)
     if device.type == "cuda":
         print(f"  GPU: {torch.cuda.get_device_name(0)}", flush=True)
+
+    if args.epochs > 0:
+        print(
+            f"Fixed epoch run: --epochs={args.epochs} (early stability stop disabled)",
+            flush=True,
+        )
 
     rollout_from_disk = bool(args.rollout_dir.strip())
     n_shard_files = 0
@@ -340,7 +367,8 @@ def main() -> None:
             stop_reason = "stable_val_cv"
             print(
                 f"  Stability reached at epoch={epoch}: val_cv={cv:.5f} < {args.stable_rel} "
-                f"(tr_q={stats['q_loss']:.4f} val_q={val_q:.4f})",
+                f"(tr_q={stats['q_loss']:.4f} tr_rmse={math.sqrt(max(0.0, stats['q_loss'])):.4f} "
+                f"val_q={val_q:.4f} val_rmse={math.sqrt(max(0.0, val_q)):.4f})",
                 flush=True,
             )
             break
@@ -348,9 +376,12 @@ def main() -> None:
         if epoch % args.log_every == 0:
             elapsed = time.perf_counter() - wall_start
             cv_s = f"{cv:.5f}" if cv is not None else "n/a"
+            tr_rmse = math.sqrt(max(0.0, stats["q_loss"]))
+            val_rmse = math.sqrt(max(0.0, val_q))
             print(
                 f"  {elapsed:6.1f}s  epoch={epoch:5d}  tr_q={stats['q_loss']:.4f}  "
-                f"val_q={val_q:.4f}  val_cv={cv_s}",
+                f"tr_rmse={tr_rmse:.4f}  val_q={val_q:.4f}  val_rmse={val_rmse:.4f}  "
+                f"val_cv={cv_s}",
                 flush=True,
             )
 
@@ -365,6 +396,9 @@ def main() -> None:
         "device": str(device),
         "stop_reason": stop_reason,
         "perm_indices_cpu": torch.tensor(perm_np, dtype=torch.long),
+        "gamma": GAMMA,
+        "q_horizon_turns": Q_TARGET_HORIZON_TURNS,
+        "q_target_spec": "future_only_gap_horizon",
     }
     if rollout_from_disk:
         assert rollout_dir_resolved is not None
@@ -394,10 +428,15 @@ def main() -> None:
         "val_samples": int(n - split),
         "final_train_q_loss": train_losses[-1] if train_losses else None,
         "final_val_q_loss": val_losses[-1] if val_losses else None,
+        "final_train_rmse": math.sqrt(max(0.0, train_losses[-1])) if train_losses else None,
+        "final_val_rmse": math.sqrt(max(0.0, val_losses[-1])) if val_losses else None,
         "final_val_cv": _val_cv(val_losses, args.stable_window),
         "seed": args.seed,
         "checkpoint": str(ckpt_path.resolve()),
         "data_source": "rollout_shards" if rollout_from_disk else "live_rollout",
+        "gamma": GAMMA,
+        "q_horizon_turns": Q_TARGET_HORIZON_TURNS,
+        "q_target_spec": "future_only_gap_horizon",
     }
     if rollout_from_disk and rollout_dir_resolved is not None:
         summary["rollout_dir"] = str(rollout_dir_resolved)

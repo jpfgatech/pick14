@@ -1,29 +1,37 @@
 """
 CP3 — Game rollout and discounted Q-target computation (instructions/05.md §Training).
 
-Target definition
------------------
-The Q network must predict the **discounted future point-gap** for the acting
-player, relative to the average of all players (including themselves).
+Target definition (2-player)
+-----------------------------
+Each timestep encodes **start-of-turn** observations (MATCH phase). The scalar
+``q_target`` approximates **future** competitive advantage only:
 
-For a 2-player game with synchronized rounds, at each player's turn t:
+1. **Immediate match scoring is excluded** from the supervised target by construction:
+   we sum discounted gaps starting at the **next** chronological turn — never the
+   current turn — so realized capture points on the acting turn (e.g. +7 from a
+   match) never enter ``q_target``. Those points belong in ``direct_q`` action logits
+   via ``immediate_pts`` at inference.
 
-    gap(t) = score_delta_p(t) - mean(score_delta_0(t), score_delta_1(t))
+2. **Finite horizon**: instead of summing to game end,
 
-where ``score_delta_p(t)`` is the score *gained* by player p in that turn
-(cards matched, converted to score points).
+       q_target[j] = Σ_{h=1..H} γ^h · gap[j+h]
 
-    target(t) = Σ_{k=t}^{T} gamma^(k-t) * gap(k)
+   where ``j`` indexes turns in **game chronological order** (same order as
+   ``rollout_game`` appends samples), ``gap[k]`` uses the usual pairwise formula
+   between concurrent opponent turns (ordinal index ``t`` within each seat), and
+   ``H = min(Q_TARGET_HORIZON_TURNS, remaining_future_turns)``.
 
-Because score gains are non-negative and usually small (0–8 pts per turn),
-targets live roughly in the range [-20, +20] for a full game.  Training does
-not require normalization for this range, but we provide a flag to do so.
+   Default ``Q_TARGET_HORIZON_TURNS = 4`` — i.e. up to **four** subsequent turns
+   / **two full rounds** of alternating play in the nominal schedule.
+
+Turn labels (documentation): chronologically ``(round r, seat s)`` follows
+``… (0,0), (0,1), (1,0), (1,1), (2,0), …`` once play alternates; ``chrono_index``
+stores overall step ``0 … N-1`` within the game.
 
 Data structures
 ---------------
-``TurnSample``: one training row — (state_tensor, q_target, opp_hand_target).
-``rollout_game``: play one full game, collect all TurnSamples.
-``print_target_distribution``: CP3 sanity check.
+``TurnSample``: state tensor, ``q_target``, opp-hand mask, ``score_delta``,
+``score_delta_match``, ``chrono_index``.
 """
 
 from __future__ import annotations
@@ -55,6 +63,8 @@ from pick14.rl.sim_core import (
 )
 
 GAMMA = 0.9  # discount factor from instructions
+# Maximum future turns included in q_target (2-player ≈ two rounds when alternating).
+Q_TARGET_HORIZON_TURNS = 4
 
 
 def exploration_rng_for_deck_rep(deck_seed: int, rep: int) -> Random:
@@ -81,19 +91,21 @@ class TurnSample:
     Attributes
     ----------
     state_tensor : np.ndarray of shape (54, 27)
-        The Q-network input for this end-of-turn state.
+        CP1 tensor before this turn is played.
     q_target : float
-        Discounted future point-gap target (computed after the game ends).
-        Set to NaN until :func:`backfill_targets` is called.
+        Discounted **future-only** gap horizon target — filled by :func:`backfill_targets`.
     opp_hand_target : np.ndarray of shape (54,)
-        Ground-truth indicator: which canonical cards are in the opponent's
-        hand at this snapshot.  Used for the auxiliary head.
+        Opponent hand mask for the auxiliary head.
     agent_seat : int
+        Seat about to act.
     turn_index : int
-        Sequential turn number for this seat (0-based).
+        That seat's 0-based move ordinal (pairs with opponent's ``turn_index`` for gaps).
     score_delta : float
-        Score points gained by the agent in *this* turn (immediate reward,
-        excluded from Q target per instructions).
+        Total score-pile points gained by ``agent_seat`` this turn (≥ 0).
+    score_delta_match : float
+        Portion of ``score_delta`` from scoring matches only (0 if pass–play path).
+    chrono_index : int
+        Step index ``0 … N-1`` in strict game chronological order (same order as rollout).
     """
 
     state_tensor: np.ndarray
@@ -102,6 +114,8 @@ class TurnSample:
     agent_seat: int
     turn_index: int
     score_delta: float
+    score_delta_match: float = 0.0
+    chrono_index: int = -1
 
 
 # ---------------------------------------------------------------------------
@@ -143,13 +157,18 @@ def _apply_policy_turn(
     state: RlPick14State,
     rng: Random,
     explore_frac: float,
-) -> int:
+) -> tuple[int, int]:
     """
     One full turn starting at MATCH.
 
     Two independent exploration draws when ``explore_frac > 0``: one at MATCH,
     one at PLAY (after match or pass).
-    Returns score delta for current player this turn.
+
+    Returns
+    -------
+    (score_delta_total, score_delta_match)
+        Match delta equals total whenever the MATCH-phase choice was a scoring match;
+        otherwise ``0``.
     """
     assert state.phase == TurnPhase.MATCH
     p = state.current_player
@@ -180,10 +199,12 @@ def _apply_policy_turn(
     else:
         raise RuntimeError(f"unexpected MATCH-phase move type {type(chosen_match)}")
 
-    return total_score_points(state, p) - score_before
+    delta = total_score_points(state, p) - score_before
+    match_pts = delta if isinstance(chosen_match, MatchMove) else 0
+    return int(delta), int(match_pts)
 
 
-def _apply_greedy_turn(state: RlPick14State) -> int:
+def _apply_greedy_turn(state: RlPick14State) -> tuple[int, int]:
     """Pure greedy baseline (no exploration). Same behaviour as ``explore_frac=0``."""
     return _apply_policy_turn(state, Random(0), 0.0)
 
@@ -257,11 +278,7 @@ def rollout_game(
         for card in state.hands[opp]:
             opp_hand_target[canonical_card_index(card)] = 1.0
 
-        score_before_all = [total_score_points(state, s) for s in range(2)]
-
-        _apply_policy_turn(state, exploration_rng, explore_frac)
-
-        score_delta_p = total_score_points(state, p) - score_before_all[p]
+        dtot, dmatch = _apply_policy_turn(state, exploration_rng, explore_frac)
 
         sample = TurnSample(
             state_tensor=tensor,
@@ -269,7 +286,9 @@ def rollout_game(
             opp_hand_target=opp_hand_target,
             agent_seat=p,
             turn_index=turn_counts[p],
-            score_delta=float(score_delta_p),
+            score_delta=float(dtot),
+            score_delta_match=float(dmatch),
+            chrono_index=len(samples),
         )
         samples.append(sample)
         turn_counts[p] += 1
@@ -288,53 +307,75 @@ def rollout_game(
 def backfill_targets(
     samples: list[TurnSample],
     gamma: float = GAMMA,
+    *,
+    horizon_turns: int = Q_TARGET_HORIZON_TURNS,
     normalize: bool = False,
 ) -> None:
     """
-    Compute and fill in ``q_target`` for each sample **in-place**.
+    Compute and fill ``q_target`` **in-place**.
 
-    Strategy: synchronized 2-player rounds.  For each turn of player p,
-    find the "concurrent" turn of the opponent (same round index if it
-    exists, otherwise the last opponent turn).
+    Per chronological timestep ``j`` (same order as ``samples`` / ``chrono_index``):
 
-    gap(t) = delta_p(t) - mean(delta_p(t), delta_opp(concurrent_t))
+    .. math::
 
-    target_p(t) = Σ_{k=t}^{T_p} gamma^(k-t) * gap_p(k)
+        \\mathrm{gap}[j]
+          = \\delta_{\\mathrm{seat}(j)}(t_j)
+            - \\frac{\\delta_{\\mathrm{seat}(j)}(t_j)
+                   + \\delta_{\\mathrm{opp}}(t_j)}{2}
 
-    The Q network is trained to predict this value for the *current* turn.
+    where ``t_j`` is that seat's ordinal turn index paired with the opponent's
+    ``t_j``-th turn (same paired-round convention as before).
+
+    **Future-only discounted horizon** (immediate capture points on turn ``j``
+    never contribute — they appear only in ``gap[j]``, which is excluded):
+
+    .. math::
+
+        q_j = \\sum_{h=1}^{H_j}
+              \\gamma^{h}\\, \\mathrm{gap}[j+h],
+        \\quad
+        H_j = \\min(\\texttt{horizon\\_turns},\\ N - 1 - j).
+
+    Default ``horizon_turns`` is ``Q_TARGET_HORIZON_TURNS`` (4 steps ≈ two rounds).
 
     Parameters
     ----------
+    horizon_turns
+        Maximum number of **following** chronological turns to include.
     normalize : bool
-        If True, divide all targets by their standard deviation across the
-        batch (zero-mean is not applied to preserve sign).  Off by default.
+        If True, divide all targets by their population standard deviation across
+        the trajectory (preserves sign).
     """
-    # Separate samples by seat.
+    n = len(samples)
+    if n == 0:
+        return
+
     by_seat: list[list[TurnSample]] = [[], []]
     for s in samples:
         by_seat[s.agent_seat].append(s)
-
     for seat in range(2):
+        by_seat[seat].sort(key=lambda z: z.turn_index)
+
+    gap_chrono = [0.0] * n
+    for j, samp in enumerate(samples):
+        seat = samp.agent_seat
+        t = samp.turn_index
         opp = 1 - seat
-        my_turns = by_seat[seat]
-        opp_turns = by_seat[opp]
-        T = len(my_turns)
+        mine = by_seat[seat]
+        theirs = by_seat[opp]
+        my_d = mine[t].score_delta if t < len(mine) else 0.0
+        op_d = theirs[t].score_delta if t < len(theirs) else 0.0
+        gap_chrono[j] = float(my_d - (my_d + op_d) / 2.0)
 
-        # delta per turn for each seat
-        my_deltas = [s.score_delta for s in my_turns]
-        opp_deltas = [s.score_delta for s in opp_turns]
-
-        # Compute per-turn gap: delta_mine − mean(delta_mine, delta_opp)
-        gaps: list[float] = []
-        for t in range(T):
-            d_opp = opp_deltas[t] if t < len(opp_deltas) else 0.0
-            gap = my_deltas[t] - (my_deltas[t] + d_opp) / 2.0
-            gaps.append(gap)
-
-        # Discounted future sum for each turn
-        for t, samp in enumerate(my_turns):
-            target = sum(gamma ** (k - t) * gaps[k] for k in range(t, T))
-            samp.q_target = target
+    cap = max(0, int(horizon_turns))
+    for j in range(n):
+        acc = 0.0
+        for h in range(1, cap + 1):
+            k = j + h
+            if k >= n:
+                break
+            acc += (gamma**h) * gap_chrono[k]
+        samples[j].q_target = acc
 
     if normalize:
         targets = [s.q_target for s in samples]
@@ -371,7 +412,7 @@ def print_target_distribution(n_games: int = 20, seed: int = 0) -> None:
           f"  min={deltas.min():.0f}  max={deltas.max():.0f}")
     print(f"  samples/game: {len(all_samples)/n_games:.1f}")
 
-    # Monotone check: targets should generally shrink toward end of game.
+    # With a short fixed horizon, |target| tends to shrink near the chron end.
     by_seat: dict[int, list[float]] = {0: [], 1: []}
     for s in all_samples:
         by_seat[s.agent_seat].append(s.q_target)

@@ -51,6 +51,10 @@ A poker-style game engine with a CLI front end (web UI to be defined).
 
 - To be defined.
 
+## PickQ supervised training (reference)
+
+Detailed formulas, rollout scale (80 000 games default), exploration ε, network architecture, and checkpoint metrics (**``tr_q``**, **``val_q``**, **``val_cv``**) live in **`instructions/05.md`**. Implementation lives under `pick14/rl/` and `scripts/05_*.py`.
+
 ## Development rules
 
 | Area        | Choice |

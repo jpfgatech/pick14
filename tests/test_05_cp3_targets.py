@@ -8,7 +8,21 @@ import numpy as np
 import pytest
 
 from pick14.rl.q_state import N_CARDS, N_CHANNELS
-from pick14.rl.q_targets import GAMMA, TurnSample, backfill_targets, rollout_game
+from pick14.rl.q_targets import (
+    GAMMA,
+    Q_TARGET_HORIZON_TURNS,
+    TurnSample,
+    backfill_targets,
+    rollout_game,
+)
+
+
+def _zeros_state() -> np.ndarray:
+    return np.zeros((N_CARDS, N_CHANNELS), dtype=np.float32)
+
+
+def _dummy_opp() -> np.ndarray:
+    return np.zeros(N_CARDS, dtype=np.float32)
 
 
 class TestRolloutGame:
@@ -49,12 +63,17 @@ class TestRolloutGame:
             idxs = by_seat[seat]
             assert idxs == list(range(len(idxs))), f"Non-sequential turn indices for seat {seat}"
 
+    def test_chrono_index_sequential(self):
+        samples = rollout_game(rng=Random(6))
+        assert [s.chrono_index for s in samples] == list(range(len(samples)))
+
     def test_score_delta_non_negative(self):
         """Score deltas are always ≥ 0 (can only gain points, never lose them)."""
         for seed in range(5):
             samples = rollout_game(rng=Random(seed))
             for s in samples:
                 assert s.score_delta >= 0.0
+                assert 0.0 <= s.score_delta_match <= s.score_delta
 
     def test_reproducible_with_same_seed(self):
         s1 = rollout_game(rng=Random(42))
@@ -71,69 +90,98 @@ class TestRolloutGame:
 
 
 class TestBackfillTargets:
-    def test_targets_filled_after_backfill(self):
+    def test_targets_finite_after_backfill(self):
         samples = rollout_game(rng=Random(10))
         backfill_targets(samples)
         for s in samples:
-            assert s.q_target != 0.0 or s.score_delta == 0.0  # zero only if all zeros
+            assert np.isfinite(s.q_target)
+
+    def test_future_only_two_turn_game(self):
+        """
+        Immediate-turn gap must not appear in q_target: only chronological futures count.
+
+        Chronological sample order: seat 0 turn 0, then seat 1 turn 0.
+        """
+        samples = [
+            TurnSample(
+                state_tensor=_zeros_state(),
+                q_target=0.0,
+                opp_hand_target=_dummy_opp(),
+                agent_seat=0,
+                turn_index=0,
+                score_delta=10.0,
+                score_delta_match=0.0,
+                chrono_index=0,
+            ),
+            TurnSample(
+                state_tensor=_zeros_state(),
+                q_target=0.0,
+                opp_hand_target=_dummy_opp(),
+                agent_seat=1,
+                turn_index=0,
+                score_delta=2.0,
+                score_delta_match=0.0,
+                chrono_index=1,
+            ),
+        ]
+        backfill_targets(samples, horizon_turns=8)
+        # gap[j=0]=10-(10+2)/2=4 ; gap[j=1]=2-6=-4
+        assert samples[0].q_target == pytest.approx(GAMMA * (-4.0))
+        assert samples[1].q_target == pytest.approx(0.0)
 
     def test_targets_within_plausible_range(self):
-        """No target should exceed the maximum possible total score in one game."""
-        max_possible_points = 200  # conservative upper bound
+        """Finite horizon keeps |q_target| modest."""
+        max_abs = 50.0
         for seed in range(10):
             samples = rollout_game(rng=Random(seed))
             backfill_targets(samples)
             for s in samples:
-                assert abs(s.q_target) <= max_possible_points
+                assert abs(s.q_target) <= max_abs
 
-    def test_last_turn_target_bounded(self):
-        """
-        The last turn has no future: its target equals only that turn's gap.
-        The gap is (delta_p - delta_opp) / 2, so |target| ≤ max(delta_p, delta_opp).
-        """
-        max_single_turn_score = 20  # conservative: at most ~4 cards × 5 pts
+    def test_last_chrono_sample_has_no_future_target(self):
         for seed in range(5):
             samples = rollout_game(rng=Random(seed))
             backfill_targets(samples)
-            for seat in [0, 1]:
-                seat_samps = [s for s in samples if s.agent_seat == seat]
-                if not seat_samps:
-                    continue
-                last = seat_samps[-1]
-                assert abs(last.q_target) <= max_single_turn_score
+            assert samples[-1].q_target == pytest.approx(0.0)
 
-    def test_discount_reduces_future_turns(self):
-        """
-        Apply discount manually and verify the backfill result matches.
-        For a single seat with known gaps, the targets should equal Σ gamma^k * gap.
-        """
+    def test_discount_matches_brute_force_rollout(self):
+        """Recompute horizon sum from chronological gaps (same formula as implementation)."""
         for seed in range(3):
             samples = rollout_game(rng=Random(seed))
-            backfill_targets(samples, gamma=GAMMA)
-            by_seat: dict[int, list[TurnSample]] = {0: [], 1: []}
+            backfill_targets(samples, gamma=GAMMA, horizon_turns=Q_TARGET_HORIZON_TURNS)
+            n = len(samples)
+            by_seat: list[list[TurnSample]] = [[], []]
             for s in samples:
                 by_seat[s.agent_seat].append(s)
-            for seat in [0, 1]:
-                opp = 1 - seat
-                mine = sorted(by_seat[seat], key=lambda x: x.turn_index)
-                opps = sorted(by_seat[opp],  key=lambda x: x.turn_index)
-                T = len(mine)
-                for t, samp in enumerate(mine):
-                    expected = 0.0
-                    for k in range(t, T):
-                        d_opp = opps[k].score_delta if k < len(opps) else 0.0
-                        gap = mine[k].score_delta - (mine[k].score_delta + d_opp) / 2
-                        expected += GAMMA ** (k - t) * gap
-                    assert abs(samp.q_target - expected) < 1e-6, (
-                        f"Target mismatch seat={seat} t={t}: "
-                        f"got {samp.q_target:.6f} expected {expected:.6f}"
-                    )
+            for seat in range(2):
+                by_seat[seat].sort(key=lambda z: z.turn_index)
+
+            gap_chrono = []
+            for samp in samples:
+                set_seat = samp.agent_seat
+                t = samp.turn_index
+                opp = 1 - set_seat
+                mine = by_seat[set_seat]
+                theirs = by_seat[opp]
+                my_d = mine[t].score_delta if t < len(mine) else 0.0
+                op_d = theirs[t].score_delta if t < len(theirs) else 0.0
+                gap_chrono.append(my_d - (my_d + op_d) / 2.0)
+
+            for j, samp in enumerate(samples):
+                exp = 0.0
+                for h in range(1, Q_TARGET_HORIZON_TURNS + 1):
+                    k = j + h
+                    if k >= n:
+                        break
+                    exp += (GAMMA**h) * gap_chrono[k]
+                assert samp.q_target == pytest.approx(exp, abs=1e-5), (
+                    f"j={j} seed={seed}"
+                )
 
     def test_normalize_flag_reduces_scale(self):
         samples = rollout_game(rng=Random(20))
         backfill_targets(samples, normalize=True)
         targets = np.array([s.q_target for s in samples])
-        # After normalization, std ≈ 1.0 (may not be exact due to integer arithmetic)
         assert targets.std() < 5.0
 
     def test_sum_of_all_gaps_is_zero(self):
@@ -141,9 +189,6 @@ class TestBackfillTargets:
         for seed in range(10):
             samples = rollout_game(rng=Random(seed))
             backfill_targets(samples)
-            # per-turn gap for seat 0 = -per-turn gap for seat 1 (zero sum)
-            # So the sum over all raw gaps across all seats should be ~0.
-            # We check via score deltas: Σ gap_0(t) + Σ gap_1(t) = 0
             by_seat: dict[int, list[float]] = {0: [], 1: []}
             for s in samples:
                 by_seat[s.agent_seat].append(s.score_delta)

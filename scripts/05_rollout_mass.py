@@ -6,7 +6,9 @@ initial shuffle (``Random(deck_seed)`` → ``new_game``) but separate exploratio
 RNGs — **N × R** games total (default **10_000 × 8 = 80_000**).
 
 Uses ε = ``--explore-frac`` (default **0.25**) random exploration vs greedy baseline
-at MATCH and PLAY decisions.
+at MATCH and PLAY decisions.  Per-game ``backfill_targets`` writes **future-only**
+discounted pairwise gaps (next up to ``Q_TARGET_HORIZON_TURNS`` chronological
+steps; default **4** / two rounds), not the full-game return.
 
 Writes compressed NumPy shards plus ``manifest.jsonl.gz`` (one JSON object per game).
 
@@ -17,7 +19,7 @@ Smoke test (few games):
     python scripts/05_rollout_mass.py --deck-configs 2 --reps-per-deck 3 \\
         --shard-every-games 2 --max-games 4 --output-dir rollout_chunks
 
-Full scale:
+Full scale (``q_target`` = future-only γ-weighted horizon from ``backfill_targets``):
     python scripts/05_rollout_mass.py --deck-configs 10000 --reps-per-deck 8 \\
         --explore-frac 0.25 --shard-every-games 500 --output-dir rollout_data
 """
