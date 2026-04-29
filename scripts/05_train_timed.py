@@ -333,14 +333,21 @@ def main() -> None:
     stop_reason = "max_epochs"
     budget_s = args.max_minutes * 60.0 if args.max_minutes > 0 else None
 
-    print(
-        f"Training until val loss stable (cv < {args.stable_rel} over "
-        f"{args.stable_window} epochs after {args.min_epochs} epochs), "
-        f"or max_epochs={args.max_epochs}"
-        + (f", or max_minutes={args.max_minutes}" if budget_s else "")
-        + f", batch={args.batch} ...",
-        flush=True,
-    )
+    if args.epochs > 0:
+        print(
+            f"Training for exactly {args.epochs} epochs (stability stop disabled), "
+            f"batch={args.batch} ...",
+            flush=True,
+        )
+    else:
+        print(
+            f"Training until val loss stable (cv < {args.stable_rel} over "
+            f"{args.stable_window} epochs after {args.min_epochs} epochs), "
+            f"or max_epochs={args.max_epochs}"
+            + (f", or max_minutes={args.max_minutes}" if budget_s else "")
+            + f", batch={args.batch} ...",
+            flush=True,
+        )
 
     while epoch < args.max_epochs:
         if budget_s is not None and (time.perf_counter() - wall_start) >= budget_s:
