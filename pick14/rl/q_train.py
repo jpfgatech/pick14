@@ -4,10 +4,52 @@ Shared training utilities for CP4 and CP5.
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import numpy as np
 import torch
 import torch.nn as nn
 
 from pick14.rl.q_targets import TurnSample
+
+
+def load_rollout_shards_numpy(rollout_dir: str | Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Load all ``shard_*.npz`` files produced by ``scripts/05_rollout_mass.py``.
+
+    Each shard contains arrays ``x`` ((N, 54, 27)), ``qt`` ((N, 1)), ``opp`` ((N, 54)).
+    Float16 shards are promoted to float32 for training.
+
+    Parameters
+    ----------
+    rollout_dir
+        Directory containing ``shard_XXXXX.npz`` files.
+
+    Returns
+    -------
+    x, qt, opp
+        Concatenated NumPy arrays, row-aligned.
+    """
+    root = Path(rollout_dir)
+    paths = sorted(root.glob("shard_*.npz"))
+    if not paths:
+        raise FileNotFoundError(
+            f"No shard_*.npz files under {root.resolve()} — run scripts/05_rollout_mass.py first."
+        )
+    xs: list[np.ndarray] = []
+    qts: list[np.ndarray] = []
+    opps: list[np.ndarray] = []
+    for p in paths:
+        z = np.load(p)
+        xs.append(np.asarray(z["x"]))
+        qts.append(np.asarray(z["qt"]))
+        opps.append(np.asarray(z["opp"]))
+    x = np.concatenate(xs, axis=0).astype(np.float32, copy=False)
+    qt = np.concatenate(qts, axis=0).astype(np.float32, copy=False)
+    opp = np.concatenate(opps, axis=0).astype(np.float32, copy=False)
+    if qt.ndim == 1:
+        qt = qt.reshape(-1, 1)
+    return x, qt, opp
 
 
 def samples_to_tensors(
@@ -19,8 +61,6 @@ def samples_to_tensors(
         q_targets : (N, 1)       — Q regression targets
         opp_hand  : (N, 54)      — opponent hand binary targets
     """
-    import numpy as np
-
     x   = torch.from_numpy(np.stack([s.state_tensor    for s in samples])).float()
     qt  = torch.tensor([[s.q_target]                   for s in samples], dtype=torch.float32)
     opp = torch.from_numpy(np.stack([s.opp_hand_target for s in samples])).float()

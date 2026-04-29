@@ -1,4 +1,5 @@
 @echo off
-REM GPU server: timed PickQ training — absolute paths so SSH/cmd sessions behave (see project_rule.md).
+REM GPU server: timed PickQ training from saved rollout shards (see project_rule.md).
+REM Requires rollout_data\shard_*.npz from scripts\05_rollout_mass.py first.
 cd /d C:\Users\Administrator\Documents\projects\pick14
-"C:\Users\Administrator\Documents\projects\venv\Scripts\python.exe" -u "C:\Users\Administrator\Documents\projects\pick14\scripts\05_train_timed.py" --games 800 --batch 64 --log-file train_run.log
+"C:\Users\Administrator\Documents\projects\venv\Scripts\python.exe" -u "C:\Users\Administrator\Documents\projects\pick14\scripts\05_train_timed.py" --rollout-dir rollout_data --batch 64 --log-file train_run.log
