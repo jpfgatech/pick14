@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Train PickQNet from rollout shards — run inside **Git Bash** on Windows (same layout as rollout scripts).
+# Train PickQNet from rollout shards — run inside **Git Bash** on Windows.
+# Sync git manually when GitHub is reachable (GPU server may be offline).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -10,10 +11,6 @@ if [[ ! -d "${ROOT}/.git" ]]; then
   echo "error: ${ROOT} is not a git checkout (missing .git)" >&2
   exit 1
 fi
-
-git fetch origin
-git checkout evolve-play-strategy
-git pull origin evolve-play-strategy
 
 PYTHON="${ROOT}/../venv/Scripts/python.exe"
 if [[ ! -f "${PYTHON}" ]]; then
