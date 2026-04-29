@@ -14,14 +14,9 @@
 
 set -euo pipefail
 
-HOST="${PICK14_REMOTE_HOST:-}"
-if [[ -z "${HOST}" ]]; then
-  echo "Set PICK14_REMOTE_HOST to the Windows machine hostname or IP, then re-run." >&2
-  echo "Example: export PICK14_REMOTE_HOST=203.0.113.50 && ./scripts/launch_rollout_mass_remote.sh" >&2
-  exit 1
-fi
-
-USER="${PICK14_REMOTE_USER:-Administrator}"
+# Default GPU server — see project_rule.md (override with PICK14_REMOTE_HOST).
+HOST="${PICK14_REMOTE_HOST:-100.74.144.124}"
+USER="${PICK14_REMOTE_USER:-administrator}"
 
 echo "SSH ${USER}@${HOST} → run_rollout_mass_remote.bat"
 ssh "${USER}@${HOST}" 'cmd.exe /c "C:\Users\Administrator\Documents\projects\pick14\scripts\run_rollout_mass_remote.bat"'

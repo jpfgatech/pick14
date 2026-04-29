@@ -21,6 +21,9 @@ You are encouraged to log the results instead of relying solely on the visualiza
 Future simulations will refer to existing instructions. You may be instructed to, or if you would, explicitly ask for permission to refactor the code to extract the common parts into common/ directory
 
 You should always use ~/Documents/projects/venv as python virtual environment.
+
+**GPU server (mass rollout / heavy training):** SSH `administrator@100.74.144.124`. Same repo layout as local development is mirrored under `C:\Users\Administrator\Documents\projects\pick14` on that machine (see `scripts/run_rollout_mass_remote.bat`, `scripts/launch_rollout_mass_remote.sh`).
+
 You are allowed to execute the python scripts in place
 You are encouraged to commit frequenctly with meaningful messages. You should often use commit --amend to keep meaningful commits only
 You should keep the data file in artifacts/ folder to avoid resimulation each time.
