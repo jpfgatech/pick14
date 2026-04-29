@@ -93,6 +93,17 @@ class TestTurnRecord:
 # ── GameHistory ──────────────────────────────────────────────────────────────
 
 class TestGameHistory:
+    def test_seed_instruction_opponent_public_t_minus_1(self):
+        """05-1 opening: starter public appears under opponent public @ t-1 only."""
+        state = new_game(2, rng=Random(42))
+        h = GameHistory(n_seats=2)
+        h.seed_instruction_state_01_public(state)
+        x = encode_q_state(state, agent_seat=0, history=h)
+        assert x[:, 3].sum() == pytest.approx(0.0)
+        assert x[:, 9].sum() > 0.0
+        for card in state.public:
+            assert x[canonical_card_index(card), 9] == pytest.approx(1.0)
+
     def test_initial_all_empty(self):
         h = GameHistory(n_seats=2)
         for seat in range(2):

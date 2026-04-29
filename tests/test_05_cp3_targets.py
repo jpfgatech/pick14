@@ -10,10 +10,12 @@ import pytest
 from pick14.rl.q_state import N_CARDS, N_CHANNELS
 from pick14.rl.q_targets import (
     GAMMA,
-    Q_TARGET_HORIZON_TURNS,
+    Q_TARGET_HORIZON_ROUNDS,
     TurnSample,
     backfill_targets,
+    instruction_gap_round,
     rollout_game,
+    rollout_game_stem_greedy_stingy,
 )
 
 
@@ -96,12 +98,8 @@ class TestBackfillTargets:
         for s in samples:
             assert np.isfinite(s.q_target)
 
-    def test_future_only_two_turn_game(self):
-        """
-        Immediate-turn gap must not appear in q_target: only chronological futures count.
-
-        Chronological sample order: seat 0 turn 0, then seat 1 turn 0.
-        """
+    def test_instruction_gap_two_turn_trajectory(self):
+        """Instruction targets pair consecutive rows (j,j+1),(j+2,j+3); γ^0 on first GAP."""
         samples = [
             TurnSample(
                 state_tensor=_zeros_state(),
@@ -125,8 +123,8 @@ class TestBackfillTargets:
             ),
         ]
         backfill_targets(samples, horizon_turns=8)
-        # gap[j=0]=10-(10+2)/2=4 ; gap[j=1]=2-6=-4
-        assert samples[0].q_target == pytest.approx(GAMMA * (-4.0))
+        # GAP1 from rows (0,1): (2-10)/2 = -4 ; no second pair → q = -4
+        assert samples[0].q_target == pytest.approx(-4.0)
         assert samples[1].q_target == pytest.approx(0.0)
 
     def test_targets_within_plausible_range(self):
@@ -144,39 +142,29 @@ class TestBackfillTargets:
             backfill_targets(samples)
             assert samples[-1].q_target == pytest.approx(0.0)
 
-    def test_discount_matches_brute_force_rollout(self):
-        """Recompute horizon sum from chronological gaps (same formula as implementation)."""
+    def test_discount_matches_instruction_series_rollout(self):
+        """Recompute q_target from instruction_gap_round — same as backfill_targets."""
         for seed in range(3):
             samples = rollout_game(rng=Random(seed))
-            backfill_targets(samples, gamma=GAMMA, horizon_turns=Q_TARGET_HORIZON_TURNS)
-            n = len(samples)
-            by_seat: list[list[TurnSample]] = [[], []]
-            for s in samples:
-                by_seat[s.agent_seat].append(s)
-            for seat in range(2):
-                by_seat[seat].sort(key=lambda z: z.turn_index)
-
-            gap_chrono = []
-            for samp in samples:
-                set_seat = samp.agent_seat
-                t = samp.turn_index
-                opp = 1 - set_seat
-                mine = by_seat[set_seat]
-                theirs = by_seat[opp]
-                my_d = mine[t].score_delta if t < len(mine) else 0.0
-                op_d = theirs[t].score_delta if t < len(theirs) else 0.0
-                gap_chrono.append(my_d - (my_d + op_d) / 2.0)
-
+            backfill_targets(samples, gamma=GAMMA, horizon_rounds=Q_TARGET_HORIZON_ROUNDS)
             for j, samp in enumerate(samples):
                 exp = 0.0
-                for h in range(1, Q_TARGET_HORIZON_TURNS + 1):
-                    k = j + h
-                    if k >= n:
+                for r in range(Q_TARGET_HORIZON_ROUNDS):
+                    g = instruction_gap_round(samples, j, r)
+                    if g is None:
                         break
-                    exp += (GAMMA**h) * gap_chrono[k]
+                    exp += (GAMMA**r) * g
                 assert samp.q_target == pytest.approx(exp, abs=1e-5), (
                     f"j={j} seed={seed}"
                 )
+
+    def test_opening_instruction_series_seed42_matches_hand_calc(self):
+        samples = rollout_game_stem_greedy_stingy(rng=Random(42))
+        backfill_targets(samples)
+        g0 = instruction_gap_round(samples, 0, 0)
+        g1 = instruction_gap_round(samples, 0, 1)
+        assert g0 is not None and g1 is not None
+        assert samples[0].q_target == pytest.approx(g0 + GAMMA * g1)
 
     def test_normalize_flag_reduces_scale(self):
         samples = rollout_game(rng=Random(20))

@@ -1,32 +1,29 @@
 """
 CP3 — Game rollout and discounted Q-target computation (instructions/05.md §Training).
 
-Target definition (2-player)
------------------------------
-Each timestep encodes **start-of-turn** observations (MATCH phase). The scalar
-``q_target`` approximates **future** competitive advantage only:
+Target definition (2-player, ``instructions/05-1.md``)
+----------------------------------------------------
+Each timestep encodes **begin-of-turn** MATCH-phase tensors (same instant as training).
 
-1. **Immediate match scoring is excluded** from the supervised target by construction:
-   we sum discounted gaps starting at the **next** chronological turn — never the
-   current turn — so realized capture points on the acting turn (e.g. +7 from a
-   match) never enter ``q_target``. Those points belong in ``direct_q`` action logits
-   via ``immediate_pts`` at inference.
+For chronological row ``j`` (tensor **before** that row acts), define instruction
+rounds ``r = 0, 1, …`` pairing **consecutive** scoring rows ``(j+2r, j+2r+1)``. Each pair
+has raw deltas ``a`` then ``b`` in time order::
 
-2. **Finite horizon**: instead of summing to game end,
+    GAP_{r+1} = b − (a + b) / 2     # same algebra as lines 53–54, 66–70 in 05-1
 
-       q_target[j] = Σ_{h=1..H} γ^h · gap[j+h]
+The supervised scalar matches the instruction series (**GAP1 is undiscounted**):
 
-   where ``j`` indexes turns in **game chronological order** (same order as
-   ``rollout_game`` appends samples), ``gap[k]`` uses the usual pairwise formula
-   between concurrent opponent turns (ordinal index ``t`` within each seat), and
-   ``H = min(Q_TARGET_HORIZON_TURNS, remaining_future_turns)``.
+    q_target[j] = Σ_{r=0}^{R-1} γ^{r} · GAP_{r+1}(j)
 
-   Default ``Q_TARGET_HORIZON_TURNS = 4`` — i.e. up to **four** subsequent turns
-   / **two full rounds** of alternating play in the nominal schedule.
+with ``R = Q_TARGET_HORIZON_ROUNDS`` (default **2** → **GAP1 + γ·GAP2**, series ends at **GAP2**).
 
-Turn labels (documentation): chronologically ``(round r, seat s)`` follows
-``… (0,0), (0,1), (1,0), (1,1), (2,0), …`` once play alternates; ``chrono_index``
-stores overall step ``0 … N-1`` within the game.
+This is **not** ``Σ γ^{h} gap_chrono[j+h]`` — see :func:`chrono_normalized_turn_gaps` for the
+actor-centric chronicle ``gap[k]`` (still useful as a diagnostic).
+
+Turn / label bookkeeping (``instructions/05-1.md``):
+``chrono_index`` equals chronological row ``j``. Instruction **state[r,s]** names the tensor
+**before** that row acts (opening ``state[0,1]``). Raw scores **P[r,s]** label scoring rows ``k``
+as ``P[k//2+1, k%2]`` for two alternating seats.
 
 Data structures
 ---------------
@@ -64,8 +61,9 @@ from pick14.rl.sim_core import (
     total_score_points,
 )
 GAMMA = 0.9  # discount factor from instructions
-# Maximum future turns included in q_target (2-player ≈ two rounds when alternating).
-Q_TARGET_HORIZON_TURNS = 4
+# Number of instruction **round pairs** (each pair = two consecutive chronological rows).
+Q_TARGET_HORIZON_ROUNDS = 2
+Q_TARGET_HORIZON_TURNS = Q_TARGET_HORIZON_ROUNDS  # backwards-compatible alias
 
 # Branch fan-in caps — keeps shallow-rollout cost predictable (~tens of forks / game).
 _MAX_MATCH_FORKS_WHEN_GREEDY_PASSES = 2
@@ -323,6 +321,7 @@ def _rollout_game_baseline_epsilon(
 ) -> list[TurnSample]:
     state = new_game(2, rng=rng, n_hand=n_hand)
     history = GameHistory(n_seats=2)
+    history.seed_instruction_state_01_public(state)
     samples: list[TurnSample] = []
     turn_counts = [0, 0]
 
@@ -361,6 +360,88 @@ def _rollout_game_baseline_epsilon(
     return samples
 
 
+def rollout_game_stem_greedy_stingy(
+    rng: Random | None = None,
+    *,
+    n_hand: int = 3,
+    snapshots_before_sink: list[RlPick14State] | None = None,
+) -> list[TurnSample]:
+    """
+    Full game rollout — greedy–stingy baseline on **both** seats (**no fork branches**).
+
+    Same stem trajectories as ``_rollout_game_fork_baseline_vs_baseline`` stem samples.
+    Used for mass rollout training shards (``instructions/05-1.md``).
+
+    When ``snapshots_before_sink`` is a list, each ``MATCH``-phase state **before** the
+    acting player's greedy–stingy turn is appended (clone); aligns with ``TurnSample.state_tensor``.
+    """
+    rng = rng or Random()
+    state = new_game(2, rng=rng, n_hand=n_hand)
+    history = GameHistory(n_seats=2)
+    history.seed_instruction_state_01_public(state)
+    stem_samples: list[TurnSample] = []
+    turn_counts = [0, 0]
+
+    while not is_finished(state):
+        p = state.current_player
+        if state.phase != TurnPhase.MATCH:
+            raise RuntimeError(f"Expected MATCH phase, got {state.phase}")
+
+        if snapshots_before_sink is not None:
+            snapshots_before_sink.append(clone_state(state))
+
+        opp = 1 - p
+        tensor = encode_q_state(state, agent_seat=p, history=history)
+
+        opp_hand_target = np.zeros(54, dtype=np.float32)
+        for card in state.hands[opp]:
+            opp_hand_target[canonical_card_index(card)] = 1.0
+
+        mm = greedy_stingy_match(state)
+        if mm is not None:
+            score_before = total_score_points(state, p)
+            apply_match(state, mm.public_index, mm.hand_indices, immediate_draw=True)
+            if state.phase == TurnPhase.PLAY:
+                plays = legal_play_moves(state)
+                if len(plays) > 1:
+                    gp = greedy_stingy_play(state)
+                    apply_play(state, gp.hand_index, immediate_draw=True)
+                elif plays:
+                    apply_play(state, plays[0].hand_index, immediate_draw=True)
+            dtot = int(total_score_points(state, p) - score_before)
+            dmatch = int(dtot)
+        else:
+            score_before = total_score_points(state, p)
+            apply_pass_match(state)
+            gp_base = greedy_stingy_play(state)
+            apply_play(state, gp_base.hand_index, immediate_draw=True)
+            dtot = int(total_score_points(state, p) - score_before)
+            dmatch = 0
+
+        sample = TurnSample(
+            state_tensor=tensor,
+            q_target=0.0,
+            opp_hand_target=opp_hand_target,
+            agent_seat=p,
+            turn_index=turn_counts[p],
+            score_delta=float(dtot),
+            score_delta_match=float(dmatch),
+            segment="stem",
+            chrono_index=len(stem_samples),
+        )
+        stem_samples.append(sample)
+        turn_counts[p] += 1
+
+        if not is_finished(state):
+            history.push(p, TurnRecord.from_state(state, p))
+
+    for i, s in enumerate(stem_samples):
+        s.chrono_index = i
+
+    backfill_targets(stem_samples)
+    return stem_samples
+
+
 def _rollout_game_fork_baseline_vs_baseline(
     rng: Random,
     *,
@@ -368,6 +449,7 @@ def _rollout_game_fork_baseline_vs_baseline(
     verification_states_per_game: int | None,
     n_hand: int,
     stats: BranchRolloutStats | None,
+    fork_chunks_sink: list | None = None,
 ) -> list[TurnSample]:
     """Greedy–stingy for both seats; shallow forks; each tail runs baseline vs baseline."""
     fork_tail_horizon = _effective_fork_tail_horizon(
@@ -376,6 +458,7 @@ def _rollout_game_fork_baseline_vs_baseline(
     )
     state = new_game(2, rng=rng, n_hand=n_hand)
     history = GameHistory(n_seats=2)
+    history.seed_instruction_state_01_public(state)
     stem_samples: list[TurnSample] = []
     branch_chunks: list[list[TurnSample]] = []
     turn_counts = [0, 0]
@@ -500,6 +583,10 @@ def _rollout_game_fork_baseline_vs_baseline(
             chrono += 1
             out.append(s)
 
+    if fork_chunks_sink is not None:
+        fork_chunks_sink.clear()
+        fork_chunks_sink.extend(branch_chunks)
+
     return out
 
 
@@ -514,6 +601,7 @@ def rollout_game(
     branch_horizon_turns: int = 4,
     verification_states_per_game: int | None = None,
     branch_stats: BranchRolloutStats | None = None,
+    fork_chunks_sink: list | None = None,
 ) -> list[TurnSample]:
     """
     Play one full 2-player game and return :class:`TurnSample` rows.
@@ -528,22 +616,27 @@ def rollout_game(
     (raised toward ``verification_states_per_game`` via :func:`_effective_fork_tail_horizon`).
     Rows concatenate stem then forks; targets are filled inside this call —
     **do not** call ``backfill_targets`` again on the merged list.
-    """
-    rng = rng or Random()
-    explore_mix = rng.randint(1, (1 << 31) - 1)
-    if exploration_rng is None:
-        exploration_rng = Random(explore_mix)
 
+    **RNG:** When ``fork_rollout=True``, ``rng`` is passed straight into ``new_game`` (no preliminary draws),
+    so ``Random(seed)`` yields the **same deal** as ``new_game(..., rng=Random(seed))`` in inference scripts.
+    """
     if fork_rollout:
         if explore_frac != 0.0:
             raise ValueError("use explore_frac=0 when fork_rollout=True")
+        rng = rng or Random()
         return _rollout_game_fork_baseline_vs_baseline(
             rng,
             branch_horizon_turns=branch_horizon_turns,
             verification_states_per_game=verification_states_per_game,
             n_hand=n_hand,
             stats=branch_stats,
+            fork_chunks_sink=fork_chunks_sink,
         )
+
+    rng = rng or Random()
+    explore_mix = rng.randint(1, (1 << 31) - 1)
+    if exploration_rng is None:
+        exploration_rng = Random(explore_mix)
 
     _ = policy  # legacy unused
     return _rollout_game_baseline_epsilon(rng, exploration_rng, explore_frac, n_hand)
@@ -553,44 +646,89 @@ def rollout_game(
 # Target back-fill
 # ---------------------------------------------------------------------------
 
+def chrono_normalized_turn_gaps(samples: list[TurnSample]) -> list[float]:
+    """
+    Per-sample normalized score differential used in ``backfill_targets``:
+
+    ``delta_me - (delta_me + delta_opp) / 2`` with opponent deltas paired by turn_index.
+
+    ``samples`` must be in strict chronological rollout order (same contract as back-fill).
+    """
+    n = len(samples)
+    if n == 0:
+        return []
+
+    by_seat: list[list[TurnSample]] = [[], []]
+    for s in samples:
+        by_seat[s.agent_seat].append(s)
+    for seat in range(2):
+        by_seat[seat].sort(key=lambda z: z.turn_index)
+
+    gap_chrono: list[float] = []
+    for samp in samples:
+        seat = samp.agent_seat
+        t = samp.turn_index
+        opp = 1 - seat
+        mine = by_seat[seat]
+        theirs = by_seat[opp]
+        my_d = mine[t].score_delta if t < len(mine) else 0.0
+        op_d = theirs[t].score_delta if t < len(theirs) else 0.0
+        gap_chrono.append(float(my_d - (my_d + op_d) / 2.0))
+    return gap_chrono
+
+
+def instruction_gap_round(samples: list[TurnSample], j: int, round_idx: int) -> float | None:
+    """
+    Instruction ``GAP_{round_idx+1}`` at begin-of-turn row ``j`` (05-1.md).
+
+    Pair consecutive chronological rows ``(j + 2·round_idx, j + 2·round_idx + 1)``
+    with pile deltas ``a`` then ``b`` in time order::
+
+        GAP = b − (a + b) / 2
+
+    Returns ``None`` if the pair extends past the trajectory end.
+    """
+    ra = j + 2 * round_idx
+    rb = ra + 1
+    if rb >= len(samples):
+        return None
+    a = float(samples[ra].score_delta)
+    b = float(samples[rb].score_delta)
+    return float(b - (a + b) / 2.0)
+
+
 def backfill_targets(
     samples: list[TurnSample],
     gamma: float = GAMMA,
     *,
-    horizon_turns: int = Q_TARGET_HORIZON_TURNS,
+    horizon_turns: int | None = None,
+    horizon_rounds: int | None = None,
     normalize: bool = False,
 ) -> None:
     """
-    Compute and fill ``q_target`` **in-place**.
+    Compute and fill ``q_target`` **in-place** using ``instructions/05-1.md``.
+
+        q_j = Σ_{r=0}^{R-1} γ^{r} · GAP_{r+1}(j),
+
+    where ``GAP_{r+1}(j)`` pairs chronological scoring rows ``j+2r`` and ``j+2r+1``, and
+    ``R`` is the horizon cap (default ``Q_TARGET_HORIZON_ROUNDS``).
 
     Per chronological timestep ``j`` (same order as ``samples`` / ``chrono_index``):
 
     .. math::
 
-        \\mathrm{gap}[j]
-          = \\delta_{\\mathrm{seat}(j)}(t_j)
-            - \\frac{\\delta_{\\mathrm{seat}(j)}(t_j)
-                   + \\delta_{\\mathrm{opp}}(t_j)}{2}
+        \\mathrm{GAP}_{r+1}(j)
+          = \\delta[j+2r+1] - \\frac{\\delta[j+2r] + \\delta[j+2r+1]}{2}
 
-    where ``t_j`` is that seat's ordinal turn index paired with the opponent's
-    ``t_j``-th turn (same paired-round convention as before).
-
-    **Future-only discounted horizon** (immediate capture points on turn ``j``
-    never contribute — they appear only in ``gap[j]``, which is excluded):
-
-    .. math::
-
-        q_j = \\sum_{h=1}^{H_j}
-              \\gamma^{h}\\, \\mathrm{gap}[j+h],
-        \\quad
-        H_j = \\min(\\texttt{horizon\\_turns},\\ N - 1 - j).
-
-    Default ``horizon_turns`` is ``Q_TARGET_HORIZON_TURNS`` (4 steps ≈ two rounds).
+    (:func:`chrono_normalized_turn_gaps` remains available as a **different**
+    actor-centric normalization — not used for ``q_target``.)
 
     Parameters
     ----------
     horizon_turns
-        Maximum number of **following** chronological turns to include.
+        Legacy name; same as ``horizon_rounds`` (only one may be set).
+    horizon_rounds
+        Instruction ``R``: number of consecutive round-pairs ``(j,j+1),(j+2,j+3),…``.
     normalize : bool
         If True, divide all targets by their population standard deviation across
         the trajectory (preserves sign).
@@ -599,31 +737,23 @@ def backfill_targets(
     if n == 0:
         return
 
-    by_seat: list[list[TurnSample]] = [[], []]
-    for s in samples:
-        by_seat[s.agent_seat].append(s)
-    for seat in range(2):
-        by_seat[seat].sort(key=lambda z: z.turn_index)
+    if horizon_turns is not None and horizon_rounds is not None:
+        raise ValueError("pass at most one of horizon_turns, horizon_rounds")
+    if horizon_turns is not None:
+        cap = int(horizon_turns)
+    elif horizon_rounds is not None:
+        cap = int(horizon_rounds)
+    else:
+        cap = Q_TARGET_HORIZON_ROUNDS
 
-    gap_chrono = [0.0] * n
-    for j, samp in enumerate(samples):
-        seat = samp.agent_seat
-        t = samp.turn_index
-        opp = 1 - seat
-        mine = by_seat[seat]
-        theirs = by_seat[opp]
-        my_d = mine[t].score_delta if t < len(mine) else 0.0
-        op_d = theirs[t].score_delta if t < len(theirs) else 0.0
-        gap_chrono[j] = float(my_d - (my_d + op_d) / 2.0)
-
-    cap = max(0, int(horizon_turns))
+    cap = max(0, cap)
     for j in range(n):
         acc = 0.0
-        for h in range(1, cap + 1):
-            k = j + h
-            if k >= n:
+        for r in range(cap):
+            g = instruction_gap_round(samples, j, r)
+            if g is None:
                 break
-            acc += (gamma**h) * gap_chrono[k]
+            acc += (gamma**r) * g
         samples[j].q_target = acc
 
     if normalize:

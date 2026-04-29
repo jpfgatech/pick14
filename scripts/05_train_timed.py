@@ -18,12 +18,13 @@ Definitions (precise)
 
 **Regression targets**
 
-Each ``TurnSample`` has scalar ``q_target``: **future-only** discounted score-gap
-vs the concurrent opponent — ``Σ_{h=1..H} γ^h · gap[j+h]`` in chronological turn
-order (default γ = 0.9, ``H`` = ``Q_TARGET_HORIZON_TURNS``, typically **4** future
-steps ≈ two rounds). The gap on the **current** timestep ``j`` is excluded, so
-immediate match capture points never appear in ``qt``; add those via ``immediate_pts``
-in ``direct_q`` at decision time.
+Each ``TurnSample`` has scalar ``q_target``: instruction-aligned discounted gaps per
+``instructions/05-1.md`` — ``Σ_{r=0}^{R-1} γ^r · GAP_{r+1}(j)`` where each ``GAP``
+pairs consecutive scoring rows ``(j+2r,\, j+2r+1)`` with time-ordered pile deltas
+``(a,b)`` and ``GAP = b − (a+b)/2``. Default γ = 0.9 and ``R = Q_TARGET_HORIZON_ROUNDS``
+(typically **2**, **GAP1** undiscounted). The actor-centric chronological ``gap[j]``
+(:func:`~pick14.rl.q_targets.chrono_normalized_turn_gaps`) is **diagnostic**, not ``qt``.
+Match capture on the acting turn still feeds ``immediate_pts`` in ``direct_q`` at decision time.
 
 **Forward**
 
@@ -99,7 +100,7 @@ sys.path.insert(0, ".")
 from pick14.rl.q_model import PickQNet
 from pick14.rl.q_targets import (
     GAMMA,
-    Q_TARGET_HORIZON_TURNS,
+    Q_TARGET_HORIZON_ROUNDS,
     backfill_targets,
     rollout_game,
 )
@@ -425,7 +426,8 @@ def main() -> None:
         "stop_reason": stop_reason,
         "perm_indices_cpu": torch.tensor(perm_np, dtype=torch.long),
         "gamma": GAMMA,
-        "q_horizon_turns": Q_TARGET_HORIZON_TURNS,
+        "q_horizon_rounds": Q_TARGET_HORIZON_ROUNDS,
+        "q_horizon_turns": Q_TARGET_HORIZON_ROUNDS,
         "q_target_spec": "future_only_gap_horizon",
         "opp_weight": args.opp_weight,
     }
@@ -467,7 +469,8 @@ def main() -> None:
         "checkpoint": str(ckpt_path.resolve()),
         "data_source": "rollout_shards" if rollout_from_disk else "live_rollout",
         "gamma": GAMMA,
-        "q_horizon_turns": Q_TARGET_HORIZON_TURNS,
+        "q_horizon_rounds": Q_TARGET_HORIZON_ROUNDS,
+        "q_horizon_turns": Q_TARGET_HORIZON_ROUNDS,
         "q_target_spec": "future_only_gap_horizon",
     }
     if rollout_from_disk and rollout_dir_resolved is not None:

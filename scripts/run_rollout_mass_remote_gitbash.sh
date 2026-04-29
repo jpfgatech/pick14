@@ -24,7 +24,7 @@ fi
 
 LOG="${ROOT}/rollout_mass_80k.log"
 ts() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
-echo "[$(ts)] Starting rollout_mass (10k games, fork rollout + seg)" >> "${LOG}"
+echo "[$(ts)] Starting rollout_mass (10k games, stem greedy–stingy)" >> "${LOG}"
 set +e
 "${PYTHON}" -u "${ROOT}/scripts/05_rollout_mass.py" \
   --deck-configs 10000 \
@@ -33,8 +33,6 @@ set +e
   --shard-every-games 500 \
   --output-dir rollout_data \
   --clear-output-dir \
-  --verification-states-per-game 100 \
-  --branch-horizon-turns 4 \
   >> "${LOG}" 2>&1
 ec=$?
 set -e

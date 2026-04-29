@@ -142,6 +142,22 @@ class GameHistory:
             )
         return nh
 
+    def seed_instruction_state_01_public(self, state: RlPick14State) -> None:
+        """
+        ``instructions/05-1.md`` — opening tensor **state[0, 1]**: the initial public
+        pool appears only under the **opponent** seat's most recent public snapshot
+        (``opponent_public @ t-1``), as if the starter card had been played into the
+        opponent view before seat 0 acts.
+        """
+        opp_seat = 1
+        pub = np.zeros(N_CARDS, dtype=np.float32)
+        for card in state.public:
+            pub[canonical_card_index(card)] = 1.0
+        self._records[opp_seat][0] = TurnRecord(
+            score_pile=np.zeros(N_CARDS, dtype=np.float32),
+            public_pool=pub,
+        )
+
 
 # ---------------------------------------------------------------------------
 # Full state encoder

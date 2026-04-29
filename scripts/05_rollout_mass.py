@@ -5,14 +5,13 @@ For **N** distinct deck seeds, run **R** independent games each with the same
 initial shuffle (``Random(deck_seed)`` → ``new_game``) — **N × R** games total
 (default **10_000 × 8 = 80_000**).
 
-Uses **baseline-vs-baseline fork rollout** (greedy–stingy stem + shallow MATCH/PLAY
-forks; targets filled inside ``rollout_game``). No ε exploration.
+Uses **stem-only greedy–stingy rollout** (:func:`~pick14.rl.q_targets.rollout_game_stem_greedy_stingy`;
+``instructions/05-1.md`` — no shallow fork branches). Targets filled inside rollout.
 
-Per game, fork tails are labeled ``segment=fork`` in :class:`~pick14.rl.q_targets.TurnSample`;
-shards store an optional ``seg`` column (``0`` stem, ``1`` fork) for verification splits.
+Rows are **begin-of-turn** tensors (encoded **before** the greedy MATCH/PLAY resolution). Within each game,
+chrono row ``0`` is the opening ``state[0,1]`` (history seeded); ``q_target`` pairs consecutive future scoring rows from that anchor — never attributed to the **next** state's tensor.
 
-``--verification-states-per-game`` bumps fork-tail depth toward ~that many fork rows at
-full fork spawning (bounded by global fork caps × horizon).
+Shards store ``seg`` column (always stem ``0``) for consistency with older loaders.
 
 Writes compressed NumPy shards plus ``manifest.jsonl.gz`` (one JSON object per game).
 
@@ -43,7 +42,7 @@ import numpy as np
 
 sys.path.insert(0, ".")
 
-from pick14.rl.q_targets import _effective_fork_tail_horizon, rollout_game
+from pick14.rl.q_targets import rollout_game_stem_greedy_stingy
 from pick14.rl.q_train import samples_to_tensors
 
 
@@ -84,13 +83,13 @@ def main() -> None:
         "--branch-horizon-turns",
         type=int,
         default=4,
-        help="Minimum fork-tail depth per spawned branch (before verification bump)",
+        help="Deprecated (fork rollout removed); ignored.",
     )
     p.add_argument(
         "--verification-states-per-game",
         type=int,
         default=100,
-        help="Target ~N fork-tail state rows per game (scales fork-tail horizon)",
+        help="Deprecated (fork rollout removed); ignored.",
     )
     p.add_argument(
         "--clear-output-dir",
@@ -102,21 +101,13 @@ def main() -> None:
     total_plan = args.deck_configs * args.reps_per_deck
     done_cap = args.max_games if args.max_games > 0 else total_plan
 
-    eff_horizon = _effective_fork_tail_horizon(
-        args.branch_horizon_turns,
-        args.verification_states_per_game,
-    )
-
     print(
         f"Deck seeds [{args.deck_start}, {args.deck_start + args.deck_configs}), "
         f"reps/deck={args.reps_per_deck}, planned games={total_plan}, "
         f"cap={done_cap}"
     )
     print(
-        f"fork_rollout  branch_horizon≥{args.branch_horizon_turns}  "
-        f"verification_fork_rows≈{args.verification_states_per_game}  "
-        f"effective_fork_tail_horizon={eff_horizon}  "
-        f"shard_every={args.shard_every_games}  → {args.output_dir}"
+        f"stem_greedy_stingy  shard_every={args.shard_every_games}  → {args.output_dir}"
     )
     if args.dry_run:
         print("[dry-run] exiting.")
@@ -146,19 +137,8 @@ def main() -> None:
                 if games_done >= done_cap:
                     break
                 deck_rng = Random(ds)
-                samples = rollout_game(
-                    rng=deck_rng,
-                    fork_rollout=True,
-                    branch_horizon_turns=args.branch_horizon_turns,
-                    verification_states_per_game=(
-                        args.verification_states_per_game
-                        if args.verification_states_per_game > 0
-                        else None
-                    ),
-                )
+                samples = rollout_game_stem_greedy_stingy(rng=deck_rng)
                 x, qt, opp, seg = samples_to_tensors(samples, include_segment=True)
-                n_stem = sum(1 for s in samples if s.segment == "stem")
-                n_fork = len(samples) - n_stem
 
                 mf.write(
                     json.dumps(
@@ -166,9 +146,8 @@ def main() -> None:
                             "deck_seed": ds,
                             "rep": rep,
                             "n_samples": len(samples),
-                            "n_stem": n_stem,
-                            "n_fork": n_fork,
-                            "effective_fork_tail_horizon": eff_horizon,
+                            "n_stem": len(samples),
+                            "n_fork": 0,
                             "shard_next": shard_idx,
                         }
                     )
