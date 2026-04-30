@@ -1,0 +1,20 @@
+{
+  "utc_end": "2026-04-29T00:31:35.800157+00:00",
+  "wall_seconds": 22.4,
+  "stop_reason": "stable_val_cv",
+  "epochs": 90,
+  "stable_window": 25,
+  "stable_rel": 0.05,
+  "min_epochs": 90,
+  "max_epochs": 500,
+  "max_minutes": 0.0,
+  "games": 40,
+  "samples": 1218,
+  "train_samples": 1096,
+  "val_samples": 122,
+  "final_train_q_loss": 0.1673031449317932,
+  "final_val_q_loss": 7.827452659606934,
+  "final_val_cv": 0.03308350314358967,
+  "seed": 42,
+  "checkpoint": "/Users/jiangpengfei/Documents/projects/pick14/train_runs/pickq_20260429T003113Z.pt"
+}

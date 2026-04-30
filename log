@@ -1,0 +1,472 @@
+
+Inference: immediate_pts + projected_Q → combined; greedy argmax on combined. Match branches capped at 8.
+
+========================================================================
+Step 1  ·  PickQ agent to move  ·  seat 0
+  cumulative score pts — seat0=0  seat1=0
+  public (1): [2 of  DIAMOND]
+  actor seat 0 hand (3): [0] [2 of  BLADE  ]  [1] [2 of  CLUB   ]  [2] [5 of  DIAMOND]
+  deck remaining: 47
+  Candidate actions (PickQ head @ MATCH):
+      #    imm      proj_Q    combined      prob  summary
+    ---  -----  ----------  ----------  --------  -------
+    >> 0      0      0.4119      0.4119   0.36206  pass + play [2gv/3sv] (hand[0]) → 47 draw branches
+       1      0      0.2952      0.2952   0.32221  pass + play [2gv/1sv] (hand[1]) → 47 draw branches
+       2      0      0.2749      0.2749   0.31573  pass + play [5gv/2sv] (hand[2]) → 47 draw branches
+  Decision: #0  imm=0  proj_Q=+0.4119  combined=+0.4119
+
+========================================================================
+Step 2  ·  baseline (greedy–stingy) to move  ·  seat 1
+  cumulative score pts — seat0=0  seat1=0
+  public (2): [2 of  DIAMOND], [2 of  BLADE  ]
+  actor seat 1 hand (3): [0] [8 of  CLUB   ]  [1] [9 of  BLADE  ]  [2] [3 of  DIAMOND]
+  deck remaining: 46
+  Baseline policy (same engine as apply_greedy_stingy_turn), preview on clone:
+    MATCH capture ~8 pts — pub[1] ∩ hand[1, 2]  ([2 of  BLADE  ]+[9 of  BLADE  ]+[3 of  DIAMOND])
+    then stingy PLAY hand[0] → discard [8 of  CLUB   ]
+
+========================================================================
+Step 3  ·  PickQ agent to move  ·  seat 0
+  cumulative score pts — seat0=0  seat1=8
+  public (2): [2 of  DIAMOND], [8 of  CLUB   ]
+  actor seat 0 hand (3): [0] [2 of  CLUB   ]  [1] [5 of  DIAMOND]  [2] [9 of  CLUB   ]
+  deck remaining: 43
+  Candidate actions (PickQ head @ MATCH):
+      #    imm      proj_Q    combined      prob  summary
+    ---  -----  ----------  ----------  --------  -------
+    >> 0      0      1.7042      1.7042   0.40555  pass + play [2gv/1sv] (hand[0]) → 43 draw branches
+       1      0      1.3957      1.3957   0.29788  pass + play [5gv/2sv] (hand[1]) → 43 draw branches
+       2      0      1.3913      1.3913   0.29657  pass + play [9gv/1sv] (hand[2]) → 43 draw branches
+  Decision: #0  imm=0  proj_Q=+1.7042  combined=+1.7042
+
+========================================================================
+Step 4  ·  baseline (greedy–stingy) to move  ·  seat 1
+  cumulative score pts — seat0=0  seat1=8
+  public (3): [2 of  DIAMOND], [8 of  CLUB   ], [2 of  CLUB   ]
+  actor seat 1 hand (3): [0] [7 of  CLUB   ]  [1] [5 of  BLADE  ]  [2] [9 of  HEART  ]
+  deck remaining: 42
+  Baseline policy (same engine as apply_greedy_stingy_turn), preview on clone:
+    MATCH capture ~6 pts — pub[0] ∩ hand[0, 1]  ([2 of  DIAMOND]+[7 of  CLUB   ]+[5 of  BLADE  ])
+    then stingy PLAY hand[3] → discard [3 of  CLUB   ]
+
+========================================================================
+Step 5  ·  PickQ agent to move  ·  seat 0
+  cumulative score pts — seat0=0  seat1=14
+  public (3): [8 of  CLUB   ], [2 of  CLUB   ], [3 of  CLUB   ]
+  actor seat 0 hand (3): [0] [5 of  DIAMOND]  [1] [9 of  CLUB   ]  [2] [6 of  CLUB   ]
+  deck remaining: 39
+  Candidate actions (PickQ head @ MATCH):
+      #    imm      proj_Q    combined      prob  summary
+    ---  -----  ----------  ----------  --------  -------
+    >> 0      4      0.1951      4.1951   0.85163  match pub[2](3gv/1sv) ∩ hand[0, 2](5gv/2sv+6gv/1sv) imm=4pts → 8 draw...
+       1      2      0.1500      2.1500   0.11017  match pub[0](8gv/1sv) ∩ hand[2](6gv/1sv) imm=2pts → 8 draw branches ×...
+       2      0      0.0565      0.0565   0.01358  pass + play [6gv/1sv] (hand[2]) → 39 draw branches
+       3      0     -0.0396     -0.0396   0.01234  pass + play [9gv/1sv] (hand[1]) → 39 draw branches
+       4      0     -0.0437     -0.0437   0.01228  pass + play [5gv/2sv] (hand[0]) → 39 draw branches
+  Decision: #0  imm=4  proj_Q=+0.1951  combined=+4.1951
+  --- PLAY phase (after Draw1 refill): state **before** discard ---
+  public (2): [8 of  CLUB   ], [2 of  CLUB   ]
+  actor seat 0 hand (4): [0] [9 of  CLUB   ]  [1] [K of  BLADE  ]  [2] [4 of  BLADE  ]  [3] [A of  DIAMOND]
+  deck remaining: 36
+  Q evaluation: PickQ scalar on CP1 tensor at **next player's MATCH** (one projected end-of-round state per discard — same construction as match ``project_match`` branches).
+      rk   hand         discard                  Q(end)
+    ----  -----  ----------------------  --------------
+    >>   1      2     [4 of  BLADE  ]      +0.223598
+         2      3     [A of  DIAMOND]      +0.179144
+         3      0     [9 of  CLUB   ]      +0.154043
+         4      1     [K of  BLADE  ]      +0.052665
+  FINAL PLAY (argmax Q): hand[2] → discard [4 of  BLADE  ]
+
+========================================================================
+Step 6  ·  baseline (greedy–stingy) to move  ·  seat 1
+  cumulative score pts — seat0=4  seat1=14
+  public (3): [8 of  CLUB   ], [2 of  CLUB   ], [4 of  BLADE  ]
+  actor seat 1 hand (3): [0] [9 of  HEART  ]  [1] [Q of  HEART  ]  [2] [2 of  HEART  ]
+  deck remaining: 36
+  Baseline policy (same engine as apply_greedy_stingy_turn), preview on clone:
+    MATCH capture ~5 pts — pub[1] ∩ hand[1]  ([2 of  CLUB   ]+[Q of  HEART  ])
+    then stingy PLAY hand[2] → discard [Q of  BLADE  ]
+
+========================================================================
+Step 7  ·  PickQ agent to move  ·  seat 0
+  cumulative score pts — seat0=4  seat1=19
+  public (3): [8 of  CLUB   ], [4 of  BLADE  ], [Q of  BLADE  ]
+  actor seat 0 hand (3): [0] [9 of  CLUB   ]  [1] [K of  BLADE  ]  [2] [A of  DIAMOND]
+  deck remaining: 34
+  Candidate actions (PickQ head @ MATCH):
+      #    imm      proj_Q    combined      prob  summary
+    ---  -----  ----------  ----------  --------  -------
+    >> 0      6      0.9232      6.9232   0.99530  match pub[1](4gv/3sv) ∩ hand[0, 2](9gv/1sv+1gv/2sv) imm=6pts → 8 draw...
+       1      0      0.6157      0.6157   0.00181  pass + play [1gv/2sv] (hand[2]) → 34 draw branches
+       2      0      0.5550      0.5550   0.00171  pass + play [9gv/1sv] (hand[0]) → 34 draw branches
+       3      0      0.1831      0.1831   0.00118  pass + play [13gv/3sv] (hand[1]) → 34 draw branches
+  Decision: #0  imm=6  proj_Q=+0.9232  combined=+6.9232
+  --- PLAY phase (after Draw1 refill): state **before** discard ---
+  public (2): [8 of  CLUB   ], [Q of  BLADE  ]
+  actor seat 0 hand (4): [0] [K of  BLADE  ]  [1] [K of  HEART  ]  [2] [K of  CLUB   ]  [3] [A of  HEART  ]
+  deck remaining: 31
+  Q evaluation: PickQ scalar on CP1 tensor at **next player's MATCH** (one projected end-of-round state per discard — same construction as match ``project_match`` branches).
+      rk   hand         discard                  Q(end)
+    ----  -----  ----------------------  --------------
+    >>   1      2     [K of  CLUB   ]      +1.533849
+         2      0     [K of  BLADE  ]      +1.376120
+         3      1     [K of  HEART  ]      +1.348231
+         4      3     [A of  HEART  ]      +0.767942
+  FINAL PLAY (argmax Q): hand[2] → discard [K of  CLUB   ]
+
+========================================================================
+Step 8  ·  baseline (greedy–stingy) to move  ·  seat 1
+  cumulative score pts — seat0=10  seat1=19
+  public (3): [8 of  CLUB   ], [Q of  BLADE  ], [K of  CLUB   ]
+  actor seat 1 hand (3): [0] [9 of  HEART  ]  [1] [2 of  HEART  ]  [2] [7 of  HEART  ]
+  deck remaining: 31
+  Baseline policy (same engine as apply_greedy_stingy_turn), preview on clone:
+    MATCH capture ~7 pts — pub[1] ∩ hand[1]  ([Q of  BLADE  ]+[2 of  HEART  ])
+    then stingy PLAY hand[3] → discard [10 of  HEART ]
+
+========================================================================
+Step 9  ·  PickQ agent to move  ·  seat 0
+  cumulative score pts — seat0=10  seat1=26
+  public (3): [8 of  CLUB   ], [K of  CLUB   ], [10 of  HEART ]
+  actor seat 0 hand (3): [0] [K of  BLADE  ]  [1] [K of  HEART  ]  [2] [A of  HEART  ]
+  deck remaining: 29
+  Candidate actions (PickQ head @ MATCH):
+      #    imm      proj_Q    combined      prob  summary
+    ---  -----  ----------  ----------  --------  -------
+    >> 0      5      0.6986      5.6986   0.99122  match pub[1](13gv/1sv) ∩ hand[2](1gv/4sv) imm=5pts → 8 draw branches ...
+       1      0      0.3912      0.3912   0.00491  pass + play [1gv/4sv] (hand[2]) → 29 draw branches
+       2      0     -0.5355     -0.5355   0.00194  pass + play [13gv/3sv] (hand[0]) → 29 draw branches
+       3      0     -0.5470     -0.5470   0.00192  pass + play [13gv/4sv] (hand[1]) → 29 draw branches
+  Decision: #0  imm=5  proj_Q=+0.6986  combined=+5.6986
+  --- PLAY phase (after Draw1 refill): state **before** discard ---
+  public (2): [8 of  CLUB   ], [10 of  HEART ]
+  actor seat 0 hand (4): [0] [K of  BLADE  ]  [1] [K of  HEART  ]  [2] [6 of  DIAMOND]  [3] [8 of  BLADE  ]
+  deck remaining: 27
+  Q evaluation: PickQ scalar on CP1 tensor at **next player's MATCH** (one projected end-of-round state per discard — same construction as match ``project_match`` branches).
+      rk   hand         discard                  Q(end)
+    ----  -----  ----------------------  --------------
+    >>   1      2     [6 of  DIAMOND]      +0.621680
+         2      0     [K of  BLADE  ]      +0.021411
+         3      3     [8 of  BLADE  ]      -0.013769
+         4      1     [K of  HEART  ]      -0.024360
+  FINAL PLAY (argmax Q): hand[2] → discard [6 of  DIAMOND]
+
+========================================================================
+Step 10  ·  baseline (greedy–stingy) to move  ·  seat 1
+  cumulative score pts — seat0=15  seat1=26
+  public (3): [8 of  CLUB   ], [10 of  HEART ], [6 of  DIAMOND]
+  actor seat 1 hand (3): [0] [9 of  HEART  ]  [1] [7 of  HEART  ]  [2] [RED   JOKER  ]
+  deck remaining: 27
+  Baseline policy (same engine as apply_greedy_stingy_turn), preview on clone:
+    PASS–MATCH (no scoring greedy match)
+    stingy PLAY hand[0] → discard [9 of  HEART  ]
+
+========================================================================
+Step 11  ·  PickQ agent to move  ·  seat 0
+  cumulative score pts — seat0=15  seat1=26
+  public (4): [8 of  CLUB   ], [10 of  HEART ], [6 of  DIAMOND], [9 of  HEART  ]
+  actor seat 0 hand (3): [0] [K of  BLADE  ]  [1] [K of  HEART  ]  [2] [8 of  BLADE  ]
+  deck remaining: 26
+  Candidate actions (PickQ head @ MATCH):
+      #    imm      proj_Q    combined      prob  summary
+    ---  -----  ----------  ----------  --------  -------
+    >> 0      5      1.3543      6.3543   0.99269  match pub[2](6gv/2sv) ∩ hand[2](8gv/3sv) imm=5pts → 8 draw branches ×...
+       1      0      0.8325      0.8325   0.00397  pass + play [8gv/3sv] (hand[2]) → 26 draw branches
+       2      0     -0.0153     -0.0153   0.00170  pass + play [13gv/3sv] (hand[0]) → 26 draw branches
+       3      0     -0.0490     -0.0490   0.00164  pass + play [13gv/4sv] (hand[1]) → 26 draw branches
+  Decision: #0  imm=5  proj_Q=+1.3543  combined=+6.3543
+  --- PLAY phase (after Draw1 refill): state **before** discard ---
+  public (3): [8 of  CLUB   ], [10 of  HEART ], [9 of  HEART  ]
+  actor seat 0 hand (4): [0] [K of  BLADE  ]  [1] [K of  HEART  ]  [2] [A of  CLUB   ]  [3] [Q of  DIAMOND]
+  deck remaining: 24
+  Q evaluation: PickQ scalar on CP1 tensor at **next player's MATCH** (one projected end-of-round state per discard — same construction as match ``project_match`` branches).
+      rk   hand         discard                  Q(end)
+    ----  -----  ----------------------  --------------
+    >>   1      3     [Q of  DIAMOND]      +2.021025
+         2      0     [K of  BLADE  ]      +1.746587
+         3      1     [K of  HEART  ]      +1.671282
+         4      2     [A of  CLUB   ]      +1.279658
+  FINAL PLAY (argmax Q): hand[3] → discard [Q of  DIAMOND]
+
+========================================================================
+Step 12  ·  baseline (greedy–stingy) to move  ·  seat 1
+  cumulative score pts — seat0=20  seat1=26
+  public (4): [8 of  CLUB   ], [10 of  HEART ], [9 of  HEART  ], [Q of  DIAMOND]
+  actor seat 1 hand (3): [0] [7 of  HEART  ]  [1] [RED   JOKER  ]  [2] [K of  DIAMOND]
+  deck remaining: 24
+  Baseline policy (same engine as apply_greedy_stingy_turn), preview on clone:
+    MATCH capture ~9 pts — pub[2] ∩ hand[1]  ([9 of  HEART  ]+[RED   JOKER  ])
+    then stingy PLAY hand[1] → discard [K of  DIAMOND]
+
+========================================================================
+Step 13  ·  PickQ agent to move  ·  seat 0
+  cumulative score pts — seat0=20  seat1=35
+  public (4): [8 of  CLUB   ], [10 of  HEART ], [Q of  DIAMOND], [K of  DIAMOND]
+  actor seat 0 hand (3): [0] [K of  BLADE  ]  [1] [K of  HEART  ]  [2] [A of  CLUB   ]
+  deck remaining: 22
+  Candidate actions (PickQ head @ MATCH):
+      #    imm      proj_Q    combined      prob  summary
+    ---  -----  ----------  ----------  --------  -------
+    >> 0      3      0.4513      3.4513   0.92711  match pub[3](13gv/2sv) ∩ hand[2](1gv/1sv) imm=3pts → 8 draw branches ...
+       1      0      0.1633      0.1633   0.03461  pass + play [1gv/1sv] (hand[2]) → 22 draw branches
+       2      0     -0.4164     -0.4164   0.01938  pass + play [13gv/3sv] (hand[0]) → 22 draw branches
+       3      0     -0.4412     -0.4412   0.01891  pass + play [13gv/4sv] (hand[1]) → 22 draw branches
+  Decision: #0  imm=3  proj_Q=+0.4513  combined=+3.4513
+  --- PLAY phase (after Draw1 refill): state **before** discard ---
+  public (3): [8 of  CLUB   ], [10 of  HEART ], [Q of  DIAMOND]
+  actor seat 0 hand (4): [0] [K of  BLADE  ]  [1] [K of  HEART  ]  [2] [J of  HEART  ]  [3] [J of  CLUB   ]
+  deck remaining: 20
+  Q evaluation: PickQ scalar on CP1 tensor at **next player's MATCH** (one projected end-of-round state per discard — same construction as match ``project_match`` branches).
+      rk   hand         discard                  Q(end)
+    ----  -----  ----------------------  --------------
+    >>   1      0     [K of  BLADE  ]      +0.487631
+         2      3     [J of  CLUB   ]      +0.465615
+         3      1     [K of  HEART  ]      +0.434649
+         4      2     [J of  HEART  ]      +0.402039
+  FINAL PLAY (argmax Q): hand[0] → discard [K of  BLADE  ]
+
+========================================================================
+Step 14  ·  baseline (greedy–stingy) to move  ·  seat 1
+  cumulative score pts — seat0=23  seat1=35
+  public (4): [8 of  CLUB   ], [10 of  HEART ], [Q of  DIAMOND], [K of  BLADE  ]
+  actor seat 1 hand (3): [0] [7 of  HEART  ]  [1] [3 of  BLADE  ]  [2] [10 of  DIAMOND]
+  deck remaining: 20
+  Baseline policy (same engine as apply_greedy_stingy_turn), preview on clone:
+    PASS–MATCH (no scoring greedy match)
+    stingy PLAY hand[2] → discard [10 of  DIAMOND]
+
+========================================================================
+Step 15  ·  PickQ agent to move  ·  seat 0
+  cumulative score pts — seat0=23  seat1=35
+  public (5): [8 of  CLUB   ], [10 of  HEART ], [Q of  DIAMOND], [K of  BLADE  ], [10 of  DIAMOND]
+  actor seat 0 hand (3): [0] [K of  HEART  ]  [1] [J of  HEART  ]  [2] [J of  CLUB   ]
+  deck remaining: 19
+  Candidate actions (PickQ head @ MATCH):
+      #    imm      proj_Q    combined      prob  summary
+    ---  -----  ----------  ----------  --------  -------
+    >> 0      0      0.0306      0.0306   0.34681  pass + play [11gv/1sv] (hand[2]) → 19 draw branches
+       1      0     -0.0251     -0.0251   0.32802  pass + play [13gv/4sv] (hand[0]) → 19 draw branches
+       2      0     -0.0338     -0.0338   0.32517  pass + play [11gv/4sv] (hand[1]) → 19 draw branches
+  Decision: #0  imm=0  proj_Q=+0.0306  combined=+0.0306
+
+========================================================================
+Step 16  ·  baseline (greedy–stingy) to move  ·  seat 1
+  cumulative score pts — seat0=23  seat1=35
+  public (6): [8 of  CLUB   ], [10 of  HEART ], [Q of  DIAMOND], [K of  BLADE  ], [10 of  DIAMOND], [J of  CLUB   ]
+  actor seat 1 hand (3): [0] [7 of  HEART  ]  [1] [3 of  BLADE  ]  [2] [BLACK JOKER  ]
+  deck remaining: 18
+  Baseline policy (same engine as apply_greedy_stingy_turn), preview on clone:
+    MATCH capture ~4 pts — pub[5] ∩ hand[1]  ([J of  CLUB   ]+[3 of  BLADE  ])
+    then stingy PLAY hand[3] → discard [8 of  DIAMOND]
+
+========================================================================
+Step 17  ·  PickQ agent to move  ·  seat 0
+  cumulative score pts — seat0=23  seat1=39
+  public (6): [8 of  CLUB   ], [10 of  HEART ], [Q of  DIAMOND], [K of  BLADE  ], [10 of  DIAMOND], [8 of  DIAMOND]
+  actor seat 0 hand (3): [0] [K of  HEART  ]  [1] [J of  HEART  ]  [2] [5 of  CLUB   ]
+  deck remaining: 16
+  Candidate actions (PickQ head @ MATCH):
+      #    imm      proj_Q    combined      prob  summary
+    ---  -----  ----------  ----------  --------  -------
+    >> 0      0      0.2854      0.2854   0.33929  pass + play [13gv/4sv] (hand[0]) → 16 draw branches
+       1      0      0.2706      0.2706   0.33430  pass + play [11gv/4sv] (hand[1]) → 16 draw branches
+       2      0      0.2467      0.2467   0.32641  pass + play [5gv/1sv] (hand[2]) → 16 draw branches
+  Decision: #0  imm=0  proj_Q=+0.2854  combined=+0.2854
+
+========================================================================
+Step 18  ·  baseline (greedy–stingy) to move  ·  seat 1
+  cumulative score pts — seat0=23  seat1=39
+  public (7): [8 of  CLUB   ], [10 of  HEART ], [Q of  DIAMOND], [K of  BLADE  ], [10 of  DIAMOND], [8 of  DIAMOND], [K of  HEART  ]
+  actor seat 1 hand (3): [0] [7 of  HEART  ]  [1] [BLACK JOKER  ]  [2] [7 of  BLADE  ]
+  deck remaining: 15
+  Baseline policy (same engine as apply_greedy_stingy_turn), preview on clone:
+    PASS–MATCH (no scoring greedy match)
+    stingy PLAY hand[2] → discard [7 of  BLADE  ]
+
+========================================================================
+Step 19  ·  PickQ agent to move  ·  seat 0
+  cumulative score pts — seat0=23  seat1=39
+  public (8): [8 of  CLUB   ], [10 of  HEART ], [Q of  DIAMOND], [K of  BLADE  ], [10 of  DIAMOND], [8 of  DIAMOND], [K of  HEART  ], [7 of  BLADE  ]
+  actor seat 0 hand (3): [0] [J of  HEART  ]  [1] [5 of  CLUB   ]  [2] [4 of  CLUB   ]
+  deck remaining: 14
+  Candidate actions (PickQ head @ MATCH):
+      #    imm      proj_Q    combined      prob  summary
+    ---  -----  ----------  ----------  --------  -------
+    >> 0      5      0.9688      5.9688   0.89735  match pub[1](10gv/4sv) ∩ hand[2](4gv/1sv) imm=5pts → 8 draw branches ...
+       1      3      0.7268      3.7268   0.09534  match pub[4](10gv/2sv) ∩ hand[2](4gv/1sv) imm=3pts → 8 draw branches ...
+       2      0      0.4433      0.4433   0.00358  pass + play [4gv/1sv] (hand[2]) → 14 draw branches
+       3      0     -0.2031     -0.2031   0.00187  pass + play [11gv/4sv] (hand[0]) → 14 draw branches
+       4      0     -0.2136     -0.2136   0.00185  pass + play [5gv/1sv] (hand[1]) → 14 draw branches
+  Decision: #0  imm=5  proj_Q=+0.9688  combined=+5.9688
+  --- PLAY phase (after Draw1 refill): state **before** discard ---
+  public (7): [8 of  CLUB   ], [Q of  DIAMOND], [K of  BLADE  ], [10 of  DIAMOND], [8 of  DIAMOND], [K of  HEART  ], [7 of  BLADE  ]
+  actor seat 0 hand (4): [0] [J of  HEART  ]  [1] [5 of  CLUB   ]  [2] [J of  BLADE  ]  [3] [4 of  HEART  ]
+  deck remaining: 12
+  Q evaluation: PickQ scalar on CP1 tensor at **next player's MATCH** (one projected end-of-round state per discard — same construction as match ``project_match`` branches).
+      rk   hand         discard                  Q(end)
+    ----  -----  ----------------------  --------------
+    >>   1      3     [4 of  HEART  ]      +1.051776
+         2      2     [J of  BLADE  ]      -0.750602
+         3      0     [J of  HEART  ]      -0.760259
+         4      1     [5 of  CLUB   ]      -0.780040
+  FINAL PLAY (argmax Q): hand[3] → discard [4 of  HEART  ]
+
+========================================================================
+Step 20  ·  baseline (greedy–stingy) to move  ·  seat 1
+  cumulative score pts — seat0=28  seat1=39
+  public (8): [8 of  CLUB   ], [Q of  DIAMOND], [K of  BLADE  ], [10 of  DIAMOND], [8 of  DIAMOND], [K of  HEART  ], [7 of  BLADE  ], [4 of  HEART  ]
+  actor seat 1 hand (3): [0] [7 of  HEART  ]  [1] [BLACK JOKER  ]  [2] [8 of  HEART  ]
+  deck remaining: 12
+  Baseline policy (same engine as apply_greedy_stingy_turn), preview on clone:
+    MATCH capture ~7 pts — pub[6] ∩ hand[0]  ([7 of  BLADE  ]+[7 of  HEART  ])
+    then stingy PLAY hand[3] → discard [Q of  CLUB   ]
+
+========================================================================
+Step 21  ·  PickQ agent to move  ·  seat 0
+  cumulative score pts — seat0=28  seat1=46
+  public (8): [8 of  CLUB   ], [Q of  DIAMOND], [K of  BLADE  ], [10 of  DIAMOND], [8 of  DIAMOND], [K of  HEART  ], [4 of  HEART  ], [Q of  CLUB   ]
+  actor seat 0 hand (3): [0] [J of  HEART  ]  [1] [5 of  CLUB   ]  [2] [J of  BLADE  ]
+  deck remaining: 10
+  Candidate actions (PickQ head @ MATCH):
+      #    imm      proj_Q    combined      prob  summary
+    ---  -----  ----------  ----------  --------  -------
+    >> 0      0      0.3357      0.3357   0.35981  pass + play [5gv/1sv] (hand[1]) → 10 draw branches
+       1      0      0.2353      0.2353   0.32546  pass + play [11gv/3sv] (hand[2]) → 10 draw branches
+       2      0      0.2018      0.2018   0.31473  pass + play [11gv/4sv] (hand[0]) → 10 draw branches
+  Decision: #0  imm=0  proj_Q=+0.3357  combined=+0.3357
+
+========================================================================
+Step 22  ·  baseline (greedy–stingy) to move  ·  seat 1
+  cumulative score pts — seat0=28  seat1=46
+  public (9): [8 of  CLUB   ], [Q of  DIAMOND], [K of  BLADE  ], [10 of  DIAMOND], [8 of  DIAMOND], [K of  HEART  ], [4 of  HEART  ], [Q of  CLUB   ], [5 of  CLUB   ]
+  actor seat 1 hand (3): [0] [BLACK JOKER  ]  [1] [8 of  HEART  ]  [2] [J of  DIAMOND]
+  deck remaining: 9
+  Baseline policy (same engine as apply_greedy_stingy_turn), preview on clone:
+    PASS–MATCH (no scoring greedy match)
+    stingy PLAY hand[2] → discard [J of  DIAMOND]
+
+========================================================================
+Step 23  ·  PickQ agent to move  ·  seat 0
+  cumulative score pts — seat0=28  seat1=46
+  public (10): [8 of  CLUB   ], [Q of  DIAMOND], [K of  BLADE  ], [10 of  DIAMOND], [8 of  DIAMOND], [K of  HEART  ], [4 of  HEART  ], [Q of  CLUB   ], [5 of  CLUB   ], [J of  DIAMOND]
+  actor seat 0 hand (3): [0] [J of  HEART  ]  [1] [J of  BLADE  ]  [2] [10 of  CLUB  ]
+  deck remaining: 8
+  Candidate actions (PickQ head @ MATCH):
+      #    imm      proj_Q    combined      prob  summary
+    ---  -----  ----------  ----------  --------  -------
+    >> 0      5      0.7685      5.7685   0.99000  match pub[6](4gv/4sv) ∩ hand[2](10gv/1sv) imm=5pts → 8 draw branches ...
+       1      0      0.2935      0.2935   0.00415  pass + play [10gv/1sv] (hand[2]) → 8 draw branches
+       2      0     -0.0541     -0.0541   0.00293  pass + play [11gv/4sv] (hand[0]) → 8 draw branches
+       3      0     -0.0560     -0.0560   0.00292  pass + play [11gv/3sv] (hand[1]) → 8 draw branches
+  Decision: #0  imm=5  proj_Q=+0.7685  combined=+5.7685
+  --- PLAY phase (after Draw1 refill): state **before** discard ---
+  public (9): [8 of  CLUB   ], [Q of  DIAMOND], [K of  BLADE  ], [10 of  DIAMOND], [8 of  DIAMOND], [K of  HEART  ], [Q of  CLUB   ], [5 of  CLUB   ], [J of  DIAMOND]
+  actor seat 0 hand (4): [0] [J of  HEART  ]  [1] [J of  BLADE  ]  [2] [6 of  HEART  ]  [3] [4 of  DIAMOND]
+  deck remaining: 6
+  Q evaluation: PickQ scalar on CP1 tensor at **next player's MATCH** (one projected end-of-round state per discard — same construction as match ``project_match`` branches).
+      rk   hand         discard                  Q(end)
+    ----  -----  ----------------------  --------------
+    >>   1      2     [6 of  HEART  ]      +0.316030
+         2      1     [J of  BLADE  ]      -0.133835
+         3      0     [J of  HEART  ]      -0.140428
+         4      3     [4 of  DIAMOND]      -0.222455
+  FINAL PLAY (argmax Q): hand[2] → discard [6 of  HEART  ]
+
+========================================================================
+Step 24  ·  baseline (greedy–stingy) to move  ·  seat 1
+  cumulative score pts — seat0=33  seat1=46
+  public (10): [8 of  CLUB   ], [Q of  DIAMOND], [K of  BLADE  ], [10 of  DIAMOND], [8 of  DIAMOND], [K of  HEART  ], [Q of  CLUB   ], [5 of  CLUB   ], [J of  DIAMOND], [6 of  HEART  ]
+  actor seat 1 hand (3): [0] [BLACK JOKER  ]  [1] [8 of  HEART  ]  [2] [3 of  HEART  ]
+  deck remaining: 6
+  Baseline policy (same engine as apply_greedy_stingy_turn), preview on clone:
+    MATCH capture ~13 pts — pub[9] ∩ hand[0, 2]  ([6 of  HEART  ]+[BLACK JOKER  ]+[3 of  HEART  ])
+    then stingy PLAY hand[2] → discard [7 of  DIAMOND]
+
+========================================================================
+Step 25  ·  PickQ agent to move  ·  seat 0
+  cumulative score pts — seat0=33  seat1=59
+  public (10): [8 of  CLUB   ], [Q of  DIAMOND], [K of  BLADE  ], [10 of  DIAMOND], [8 of  DIAMOND], [K of  HEART  ], [Q of  CLUB   ], [5 of  CLUB   ], [J of  DIAMOND], [7 of  DIAMOND]
+  actor seat 0 hand (3): [0] [J of  HEART  ]  [1] [J of  BLADE  ]  [2] [4 of  DIAMOND]
+  deck remaining: 3
+  Candidate actions (PickQ head @ MATCH):
+      #    imm      proj_Q    combined      prob  summary
+    ---  -----  ----------  ----------  --------  -------
+    >> 0      4      0.6852      4.6852   0.96679  match pub[3](10gv/2sv) ∩ hand[2](4gv/2sv) imm=4pts → 3 draw branches ...
+       1      0      0.2746      0.2746   0.01174  pass + play [4gv/2sv] (hand[2]) → 3 draw branches
+       2      0      0.2113      0.2113   0.01102  pass + play [11gv/3sv] (hand[1]) → 3 draw branches
+       3      0      0.1571      0.1571   0.01044  pass + play [11gv/4sv] (hand[0]) → 3 draw branches
+  Decision: #0  imm=4  proj_Q=+0.6852  combined=+4.6852
+  --- PLAY phase (after Draw1 refill): state **before** discard ---
+  public (9): [8 of  CLUB   ], [Q of  DIAMOND], [K of  BLADE  ], [8 of  DIAMOND], [K of  HEART  ], [Q of  CLUB   ], [5 of  CLUB   ], [J of  DIAMOND], [7 of  DIAMOND]
+  actor seat 0 hand (4): [0] [J of  HEART  ]  [1] [J of  BLADE  ]  [2] [6 of  BLADE  ]  [3] [9 of  DIAMOND]
+  deck remaining: 1
+  Q evaluation: PickQ scalar on CP1 tensor at **next player's MATCH** (one projected end-of-round state per discard — same construction as match ``project_match`` branches).
+      rk   hand         discard                  Q(end)
+    ----  -----  ----------------------  --------------
+    >>   1      2     [6 of  BLADE  ]      +0.914568
+         2      1     [J of  BLADE  ]      +0.498427
+         3      0     [J of  HEART  ]      +0.411754
+         4      3     [9 of  DIAMOND]      +0.226496
+  FINAL PLAY (argmax Q): hand[2] → discard [6 of  BLADE  ]
+
+========================================================================
+Step 26  ·  baseline (greedy–stingy) to move  ·  seat 1
+  cumulative score pts — seat0=37  seat1=59
+  public (10): [8 of  CLUB   ], [Q of  DIAMOND], [K of  BLADE  ], [8 of  DIAMOND], [K of  HEART  ], [Q of  CLUB   ], [5 of  CLUB   ], [J of  DIAMOND], [7 of  DIAMOND], [6 of  BLADE  ]
+  actor seat 1 hand (3): [0] [8 of  HEART  ]  [1] [10 of  BLADE ]  [2] [5 of  HEART  ]
+  deck remaining: 1
+  Baseline policy (same engine as apply_greedy_stingy_turn), preview on clone:
+    MATCH capture ~7 pts — pub[9] ∩ hand[0]  ([6 of  BLADE  ]+[8 of  HEART  ])
+    then stingy PLAY hand[0] → discard [10 of  BLADE ]
+
+========================================================================
+Step 27  ·  PickQ agent to move  ·  seat 0
+  cumulative score pts — seat0=37  seat1=66
+  public (10): [8 of  CLUB   ], [Q of  DIAMOND], [K of  BLADE  ], [8 of  DIAMOND], [K of  HEART  ], [Q of  CLUB   ], [5 of  CLUB   ], [J of  DIAMOND], [7 of  DIAMOND], [10 of  BLADE ]
+  actor seat 0 hand (3): [0] [J of  HEART  ]  [1] [J of  BLADE  ]  [2] [9 of  DIAMOND]
+  deck remaining: 0
+  Candidate actions (PickQ head @ MATCH):
+      #    imm      proj_Q    combined      prob  summary
+    ---  -----  ----------  ----------  --------  -------
+    >> 0      3      1.4103      4.4103   0.89796  match pub[6](5gv/1sv) ∩ hand[2](9gv/2sv) imm=3pts → 1 draw branches ×...
+       1      0      1.4103      1.4103   0.04471  pass + play [9gv/2sv] (hand[2]) → 1 draw branches
+       2      0      1.0256      1.0256   0.03043  pass + play [11gv/3sv] (hand[1]) → 1 draw branches
+       3      0      0.9026      0.9026   0.02691  pass + play [11gv/4sv] (hand[0]) → 1 draw branches
+  Decision: #0  imm=3  proj_Q=+1.4103  combined=+4.4103
+
+========================================================================
+Step 28  ·  baseline (greedy–stingy) to move  ·  seat 1
+  cumulative score pts — seat0=40  seat1=66
+  public (9): [8 of  CLUB   ], [Q of  DIAMOND], [K of  BLADE  ], [8 of  DIAMOND], [K of  HEART  ], [Q of  CLUB   ], [J of  DIAMOND], [7 of  DIAMOND], [10 of  BLADE ]
+  actor seat 1 hand (2): [0] [5 of  HEART  ]  [1] [A of  BLADE  ]
+  deck remaining: 0
+  Baseline policy (same engine as apply_greedy_stingy_turn), preview on clone:
+    MATCH capture ~9 pts — pub[3] ∩ hand[0, 1]  ([8 of  DIAMOND]+[5 of  HEART  ]+[A of  BLADE  ])
+
+========================================================================
+Step 29  ·  PickQ agent to move  ·  seat 0
+  cumulative score pts — seat0=40  seat1=75
+  public (8): [8 of  CLUB   ], [Q of  DIAMOND], [K of  BLADE  ], [K of  HEART  ], [Q of  CLUB   ], [J of  DIAMOND], [7 of  DIAMOND], [10 of  BLADE ]
+  actor seat 0 hand (2): [0] [J of  HEART  ]  [1] [J of  BLADE  ]
+  deck remaining: 0
+  Candidate actions (PickQ head @ MATCH):
+      #    imm      proj_Q    combined      prob  summary
+    ---  -----  ----------  ----------  --------  -------
+    >> 0      0     -0.0464     -0.0464   0.50683  pass + play [11gv/4sv] (hand[0]) → 1 draw branches
+       1      0     -0.0737     -0.0737   0.49317  pass + play [11gv/3sv] (hand[1]) → 1 draw branches
+  Decision: #0  imm=0  proj_Q=-0.0464  combined=-0.0464
+
+========================================================================
+Step 30  ·  PickQ agent to move  ·  seat 0
+  cumulative score pts — seat0=40  seat1=75
+  public (9): [8 of  CLUB   ], [Q of  DIAMOND], [K of  BLADE  ], [K of  HEART  ], [Q of  CLUB   ], [J of  DIAMOND], [7 of  DIAMOND], [10 of  BLADE ], [J of  HEART  ]
+  actor seat 0 hand (1): [0] [J of  BLADE  ]
+  deck remaining: 0
+  Candidate actions (PickQ head @ MATCH):
+      #    imm      proj_Q    combined      prob  summary
+    ---  -----  ----------  ----------  --------  -------
+    >> 0      0     -0.0430     -0.0430   1.00000  pass + play [11gv/3sv] (hand[0]) → 1 draw branches
+  Decision: #0  imm=0  proj_Q=-0.0430  combined=-0.0430
+
+========================================================================
+Final — PickQ seat 0: 40 pts   baseline seat 1: 75 pts

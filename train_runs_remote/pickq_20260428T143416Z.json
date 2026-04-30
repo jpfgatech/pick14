@@ -1,0 +1,19 @@
+{
+  "utc_end": "2026-04-28T14:37:12.228458+00:00",
+  "wall_seconds": 175.5,
+  "stop_reason": "stable_val_cv",
+  "epochs": 109,
+  "stable_window": 40,
+  "stable_rel": 0.02,
+  "min_epochs": 80,
+  "max_epochs": 50000,
+  "max_minutes": 0.0,
+  "games": 800,
+  "samples": 24382,
+  "train_samples": 21943,
+  "val_samples": 2439,
+  "final_train_q_loss": 2.5882980823516846,
+  "final_val_q_loss": 19.535696029663086,
+  "final_val_cv": 0.01905400888471759,
+  "checkpoint": "C:\\Users\\Administrator\\Documents\\projects\\pick14\\train_runs\\pickq_20260428T143416Z.pt"
+}

@@ -1,0 +1,39 @@
+[2026-04-29T10:57:39.261951+00:00] device=cuda
+  GPU: NVIDIA GeForce RTX 4060 Ti
+Fixed epoch run: --epochs=30 (early stability stop disabled)
+Loading rollout shards from C:\Users\Administrator\Documents\projects\pick14_git\rollout_data (20 files) ...
+Dataset: 1404518 samples from disk in 8.1s
+Training for exactly 30 epochs (stability stop disabled), batch=64 ...
+    47.6s  epoch=    1  tr_q=3.1584  tr_rmse=1.7772  tr_opp=0.1792  val_q=3.0235  val_rmse=1.7388  val_opp=9.0374  val_cv=n/a
+    95.3s  epoch=    2  tr_q=3.0335  tr_rmse=1.7417  tr_opp=0.1727  val_q=2.9642  val_rmse=1.7217  val_opp=9.0190  val_cv=n/a
+   143.1s  epoch=    3  tr_q=2.9610  tr_rmse=1.7208  tr_opp=0.1735  val_q=2.8974  val_rmse=1.7022  val_opp=9.1471  val_cv=n/a
+   191.1s  epoch=    4  tr_q=2.8242  tr_rmse=1.6805  tr_opp=0.1736  val_q=2.7318  val_rmse=1.6528  val_opp=9.0223  val_cv=n/a
+   239.0s  epoch=    5  tr_q=2.7558  tr_rmse=1.6601  tr_opp=0.1724  val_q=2.6783  val_rmse=1.6365  val_opp=9.0359  val_cv=n/a
+   287.0s  epoch=    6  tr_q=2.7093  tr_rmse=1.6460  tr_opp=0.1719  val_q=2.6374  val_rmse=1.6240  val_opp=8.9995  val_cv=n/a
+   334.9s  epoch=    7  tr_q=2.6873  tr_rmse=1.6393  tr_opp=0.1718  val_q=2.6540  val_rmse=1.6291  val_opp=8.9953  val_cv=n/a
+   383.0s  epoch=    8  tr_q=2.6745  tr_rmse=1.6354  tr_opp=0.1711  val_q=2.6198  val_rmse=1.6186  val_opp=9.0009  val_cv=n/a
+   431.1s  epoch=    9  tr_q=2.6638  tr_rmse=1.6321  tr_opp=0.1711  val_q=2.6078  val_rmse=1.6149  val_opp=8.9409  val_cv=n/a
+   479.3s  epoch=   10  tr_q=2.6566  tr_rmse=1.6299  tr_opp=0.1710  val_q=2.6209  val_rmse=1.6189  val_opp=8.9892  val_cv=n/a
+   527.4s  epoch=   11  tr_q=2.6480  tr_rmse=1.6273  tr_opp=0.1709  val_q=2.6258  val_rmse=1.6204  val_opp=8.9699  val_cv=n/a
+   575.5s  epoch=   12  tr_q=2.6436  tr_rmse=1.6259  tr_opp=0.1706  val_q=2.6120  val_rmse=1.6162  val_opp=8.9684  val_cv=n/a
+   623.4s  epoch=   13  tr_q=2.6363  tr_rmse=1.6237  tr_opp=0.1708  val_q=2.6252  val_rmse=1.6202  val_opp=8.9545  val_cv=n/a
+   671.5s  epoch=   14  tr_q=2.6330  tr_rmse=1.6226  tr_opp=0.1705  val_q=2.5814  val_rmse=1.6067  val_opp=8.9429  val_cv=n/a
+   719.5s  epoch=   15  tr_q=2.6281  tr_rmse=1.6211  tr_opp=0.1705  val_q=2.6092  val_rmse=1.6153  val_opp=8.9228  val_cv=n/a
+   767.7s  epoch=   16  tr_q=2.6247  tr_rmse=1.6201  tr_opp=0.1705  val_q=2.5936  val_rmse=1.6105  val_opp=8.9588  val_cv=n/a
+   815.8s  epoch=   17  tr_q=2.6216  tr_rmse=1.6191  tr_opp=0.1704  val_q=2.5777  val_rmse=1.6055  val_opp=8.9363  val_cv=n/a
+   863.9s  epoch=   18  tr_q=2.6185  tr_rmse=1.6182  tr_opp=0.1705  val_q=2.5666  val_rmse=1.6021  val_opp=8.9783  val_cv=n/a
+   911.9s  epoch=   19  tr_q=2.6122  tr_rmse=1.6162  tr_opp=0.1707  val_q=2.6223  val_rmse=1.6193  val_opp=8.9433  val_cv=n/a
+   960.0s  epoch=   20  tr_q=2.6106  tr_rmse=1.6157  tr_opp=0.1705  val_q=2.6052  val_rmse=1.6141  val_opp=8.9433  val_cv=n/a
+  1008.1s  epoch=   21  tr_q=2.6084  tr_rmse=1.6151  tr_opp=0.1703  val_q=2.5617  val_rmse=1.6005  val_opp=8.9294  val_cv=n/a
+  1056.2s  epoch=   22  tr_q=2.6074  tr_rmse=1.6147  tr_opp=0.1706  val_q=2.5919  val_rmse=1.6099  val_opp=8.9355  val_cv=n/a
+  1104.4s  epoch=   23  tr_q=2.6043  tr_rmse=1.6138  tr_opp=0.1705  val_q=2.5641  val_rmse=1.6013  val_opp=8.9493  val_cv=n/a
+  1152.6s  epoch=   24  tr_q=2.6038  tr_rmse=1.6136  tr_opp=0.1705  val_q=2.5832  val_rmse=1.6072  val_opp=8.9336  val_cv=n/a
+  1200.6s  epoch=   25  tr_q=2.6004  tr_rmse=1.6126  tr_opp=0.1704  val_q=2.5791  val_rmse=1.6060  val_opp=8.9790  val_cv=n/a
+  1248.6s  epoch=   26  tr_q=2.5990  tr_rmse=1.6121  tr_opp=0.1705  val_q=2.5625  val_rmse=1.6008  val_opp=8.9697  val_cv=n/a
+  1296.7s  epoch=   27  tr_q=2.5967  tr_rmse=1.6114  tr_opp=0.1704  val_q=2.5596  val_rmse=1.5999  val_opp=8.9572  val_cv=n/a
+  1344.9s  epoch=   28  tr_q=2.5947  tr_rmse=1.6108  tr_opp=0.1705  val_q=2.5596  val_rmse=1.5999  val_opp=8.9586  val_cv=n/a
+  1393.1s  epoch=   29  tr_q=2.5917  tr_rmse=1.6099  tr_opp=0.1709  val_q=2.5554  val_rmse=1.5986  val_opp=8.9672  val_cv=n/a
+  1441.3s  epoch=   30  tr_q=2.5918  tr_rmse=1.6099  tr_opp=0.1708  val_q=2.5611  val_rmse=1.6003  val_opp=8.9742  val_cv=n/a
+Done. stop=max_epochs  epochs=30  wall=1441.3s (24.02 min)
+Checkpoint: train_runs_remote\pickq_20260429T105748Z.pt
+Summary:    train_runs_remote\pickq_20260429T105748Z.json
